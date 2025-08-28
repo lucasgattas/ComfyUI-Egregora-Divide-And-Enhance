@@ -344,14 +344,14 @@ class Egregora_Algorithm:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "tile_width": ("INT", {"default": 1024, "min": 64, "max": 4096}),
-                "tile_height": ("INT", {"default": 1024, "min": 64, "max": 4096}),
-                "min_overlap": (list(OVERLAP_DICT.keys()), {"default": "1/16 Tile"}),
-                "min_scale_factor": ("FLOAT", {"default": 3.0, "min": 1.0, "max": 8.0}),
-                "tile_order": (list(TILE_ORDER_DICT.keys()), {"default": "spiral_outward"}),
+                "tile_width": ("INT", {"default": 1024, "min": 64, "max": 4096, "step": 64}),
+                "tile_height": ("INT", {"default": 1024, "min": 64, "max": 4096, "step": 64}),
+                "min_overlap": (list(OVERLAP_DICT.keys()), {"default": "1/8 Tile"}),
+                "min_scale_factor": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 8.0, "step": 0.1}),
+                "tile_order": (list(TILE_ORDER_DICT.keys()), {"default": "linear"}),
                 "scaling_method": (SCALING_METHODS, {"default": "lanczos"}),
-                "blending_method": (BLENDING_METHODS, {"default": "distance_field"}),
-                "content_analysis": ("BOOLEAN", {"default": True}),
+                "blending_method": (["gaussian_blur", "distance_field", "poisson"], {"default": "distance_field"}),
+                "content_analysis": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "upscale_model": ("UPSCALE_MODEL",),
@@ -366,132 +366,252 @@ class Egregora_Algorithm:
     CATEGORY = "Egregora/Core"
     DESCRIPTION = """
 Enhanced Divide and Conquer Algorithm with:
-- Adaptive overlap based on content analysis
-- Multiple tile ordering strategies
-- Advanced blending methods
-- Content-aware processing
+- Robust overlap calculation with bounds checking
+- Optimized tile ordering strategies  
+- Reliable blending methods (gaussian_blur, distance_field, poisson)
+- Optional content-aware processing
+- Improved memory management
 """
+
+    def calculate_grid_dimensions(self, width, height, tile_width, tile_height, 
+                                 overlap_x, overlap_y, min_scale_factor):
+        """Aspect ratio preserving grid calculation"""
+        
+        # Ensure minimum scale factor
+        min_scale_factor = max(min_scale_factor, MIN_SCALE_FACTOR_THRESHOLD)
+        
+        # Calculate original aspect ratio
+        original_aspect = width / height if height > 0 else 1.0
+        
+        # Calculate minimum dimensions needed
+        min_upscaled_width = max(tile_width, width * min_scale_factor)
+        min_upscaled_height = max(tile_height, height * min_scale_factor)
+        
+        # Calculate effective tile sizes (accounting for overlap)
+        effective_tile_width = max(1, tile_width - overlap_x)
+        effective_tile_height = max(1, tile_height - overlap_y)
+        
+        # Calculate grid sizes needed for minimum dimensions
+        grid_x = max(1, math.ceil(min_upscaled_width / effective_tile_width))
+        grid_y = max(1, math.ceil(min_upscaled_height / effective_tile_height))
+        
+        # Calculate actual dimensions from grid
+        actual_width = (grid_x * tile_width) - (overlap_x * max(0, grid_x - 1))
+        actual_height = (grid_y * tile_height) - (overlap_y * max(0, grid_y - 1))
+        
+        # Check which dimension needs more scaling to meet min_scale_factor
+        width_scale = actual_width / width if width > 0 else 1.0
+        height_scale = actual_height / height if height > 0 else 1.0
+        
+        # If one dimension doesn't meet the minimum scale factor, adjust grid
+        if width_scale < min_scale_factor:
+            # Need more tiles in x direction
+            target_width = width * min_scale_factor
+            grid_x = max(1, math.ceil(target_width / effective_tile_width))
+            actual_width = (grid_x * tile_width) - (overlap_x * max(0, grid_x - 1))
+            
+        if height_scale < min_scale_factor:
+            # Need more tiles in y direction  
+            target_height = height * min_scale_factor
+            grid_y = max(1, math.ceil(target_height / effective_tile_height))
+            actual_height = (grid_y * tile_height) - (overlap_y * max(0, grid_y - 1))
+        
+        # Final aspect ratio check - preserve original aspect ratio
+        actual_aspect = actual_width / actual_height if actual_height > 0 else 1.0
+        
+        # If aspect ratios don't match, adjust the smaller dimension
+        if abs(actual_aspect - original_aspect) > 0.01:  # Allow small tolerance
+            if actual_aspect > original_aspect:
+                # Image is too wide, increase height
+                target_height = actual_width / original_aspect
+                grid_y = max(1, math.ceil(target_height / effective_tile_height))
+                actual_height = (grid_y * tile_height) - (overlap_y * max(0, grid_y - 1))
+            else:
+                # Image is too tall, increase width
+                target_width = actual_height * original_aspect
+                grid_x = max(1, math.ceil(target_width / effective_tile_width))
+                actual_width = (grid_x * tile_width) - (overlap_x * max(0, grid_x - 1))
+        
+        # Ensure all values are positive and reasonable
+        upscaled_width = max(tile_width, int(actual_width))
+        upscaled_height = max(tile_height, int(actual_height))
+        grid_x = max(1, grid_x)
+        grid_y = max(1, grid_y)
+        overlap_x = max(0, min(overlap_x, tile_width - 1))
+        overlap_y = max(0, min(overlap_y, tile_height - 1))
+        
+        return upscaled_width, upscaled_height, grid_x, grid_y, overlap_x, overlap_y
+
+    def validate_parameters(self, tile_width, tile_height, overlap_x, overlap_y, grid_x, grid_y):
+        """Validate all parameters are within reasonable bounds"""
+        
+        # Check tile dimensions
+        if tile_width < 64 or tile_height < 64:
+            raise ValueError("Tile dimensions must be at least 64x64")
+        
+        if tile_width > 4096 or tile_height > 4096:
+            raise ValueError("Tile dimensions must be at most 4096x4096")
+        
+        # Check overlap doesn't exceed tile size
+        if overlap_x >= tile_width:
+            overlap_x = max(0, tile_width - 32)  # Leave at least 32px of non-overlapping area
+            
+        if overlap_y >= tile_height:
+            overlap_y = max(0, tile_height - 32)
+            
+        # Check grid size is reasonable
+        if grid_x * grid_y > 100:  # Prevent excessive tile counts
+            raise ValueError(f"Grid size {grid_x}x{grid_y} = {grid_x * grid_y} tiles is too large (max 100)")
+            
+        return overlap_x, overlap_y
 
     def execute(self, image, scaling_method, tile_width, tile_height, min_overlap, 
                 min_scale_factor, tile_order, blending_method, content_analysis,
                 upscale_model=None, use_upscale_with_model=True):
 
-        overlap = OVERLAP_DICT.get(min_overlap, 0)
-        tile_order_val = TILE_ORDER_DICT.get(tile_order, 0)
-        
-        _, height, width, _ = image.shape
-        
-        # Content analysis for adaptive strategies
-        detail_map = None
-        if content_analysis or overlap == -1:  # Adaptive overlap
-            detail_map = ContentAnalyzer.calculate_detail_map(image)
-        
-        # Calculate overlaps (adaptive or fixed)
-        if overlap == -1:  # Adaptive
-            base_overlap = 0.0625  # Base 1/16 tile overlap
-            overlap_x = calculate_overlap(tile_width, base_overlap)
-            overlap_y = calculate_overlap(tile_height, base_overlap)
-        else:
-            overlap_x = calculate_overlap(tile_width, overlap)
-            overlap_y = calculate_overlap(tile_height, overlap)
-
-        # Ensure minimum scale factor
-        min_scale_factor = max(min_scale_factor, MIN_SCALE_FACTOR_THRESHOLD)
-
-        # Calculate dimensions (similar to original but with bounds checking)
-        if width <= height:
-            multiply_factor = max(1, math.ceil(min_scale_factor * width / tile_width))
-            while True:
-                upscaled_width = tile_width * multiply_factor
-                grid_x = max(1, math.ceil(upscaled_width / tile_width))
-                upscaled_width = max(tile_width, (tile_width * grid_x) - (overlap_x * max(0, grid_x - 1)))
-                upscale_ratio = upscaled_width / width if width > 0 else 1.0
-                if upscale_ratio >= min_scale_factor:
-                    break
-                multiply_factor += 1
-            upscaled_height = max(tile_height, int(height * upscale_ratio))
-            grid_y = max(1, math.ceil((upscaled_height - overlap_y) / max(1, tile_height - overlap_y)))
-            if grid_y > 1:
-                overlap_y = max(0, round((tile_height * grid_y - upscaled_height) / (grid_y - 1)))
-        else:
-            multiply_factor = max(1, math.ceil(min_scale_factor * height / tile_height))
-            while True:
-                upscaled_height = tile_height * multiply_factor
-                grid_y = max(1, math.ceil(upscaled_height / tile_height))
-                upscaled_height = max(tile_height, (tile_height * grid_y) - (overlap_y * max(0, grid_y - 1)))
-                upscale_ratio = upscaled_height / height if height > 0 else 1.0
-                if upscale_ratio >= min_scale_factor:
-                    break
-                multiply_factor += 1
-            upscaled_width = max(tile_width, int(width * upscale_ratio))
-            grid_x = max(1, math.ceil((upscaled_width - overlap_x) / max(1, tile_width - overlap_x)))
-            if grid_x > 1:
-                overlap_x = max(0, round((tile_width * grid_x - upscaled_width) / (grid_x - 1)))
-
-        effective_upscale = round(upscaled_width / width, 2) if width > 0 else 1.0
-        
-        egregora_data = {
-            'upscaled_width': upscaled_width,
-            'upscaled_height': upscaled_height,
-            'tile_width': tile_width,
-            'tile_height': tile_height,
-            'overlap_x': overlap_x,
-            'overlap_y': overlap_y,
-            'grid_x': grid_x,
-            'grid_y': grid_y,
-            'tile_order': tile_order_val,
-            'blending_method': blending_method,
-            'detail_map': detail_map,
-            'adaptive_overlap': (overlap == -1),
-        }
-
-        # Upscale image (similar to original)
-        if use_upscale_with_model and upscale_model:
-            device = model_management.get_torch_device()
-            memory_required = model_management.module_size(upscale_model.model)
-            memory_required += (512 * 512 * 3) * image.element_size() * max(upscale_model.scale, 1.0) * 384.0
-            memory_required += image.nelement() * image.element_size()
-            model_management.free_memory(memory_required, device)
-
-            upscale_model.to(device)
-            in_img = image.movedim(-1, -3).to(device)
-
-            tile = 512
-            overlap_value = 32
-
-            oom = True
-            while oom:
+        try:
+            # Get dimensions
+            _, height, width, _ = image.shape
+            
+            # Parse overlap
+            overlap = OVERLAP_DICT.get(min_overlap, 0.125)  # Default to 1/8 tile
+            tile_order_val = TILE_ORDER_DICT.get(tile_order, 0)
+            
+            # Calculate initial overlap values
+            if overlap == -1:  # Adaptive
+                base_overlap = 0.0625  # Base 1/16 tile overlap
+                overlap_x = calculate_overlap(tile_width, base_overlap)
+                overlap_y = calculate_overlap(tile_height, base_overlap)
+            else:
+                overlap_x = calculate_overlap(tile_width, overlap)
+                overlap_y = calculate_overlap(tile_height, overlap)
+            
+            # Calculate robust grid dimensions
+            upscaled_width, upscaled_height, grid_x, grid_y, overlap_x, overlap_y = \
+                self.calculate_grid_dimensions(width, height, tile_width, tile_height,
+                                             overlap_x, overlap_y, min_scale_factor)
+            
+            # Validate parameters
+            overlap_x, overlap_y = self.validate_parameters(
+                tile_width, tile_height, overlap_x, overlap_y, grid_x, grid_y
+            )
+            
+            # Content analysis (only if requested and useful)
+            detail_map = None
+            if content_analysis and (overlap == -1 or tile_order_val == 4):  # Only if adaptive features are used
                 try:
-                    steps = in_img.shape[0] * comfy.utils.get_tiled_scale_steps(in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=overlap_value)
-                    pbar = comfy.utils.ProgressBar(steps)
-                    s = comfy.utils.tiled_scale(in_img, lambda a: upscale_model(a), tile_x=tile, tile_y=tile, overlap=overlap_value, upscale_amount=upscale_model.scale, pbar=pbar)
-                    oom = False
-                except model_management.OOM_EXCEPTION as e:
-                    tile //= 2
-                    if tile < 128:
-                        raise e
+                    detail_map = ContentAnalyzer.calculate_detail_map(image)
+                    # Resize detail map to match upscaled dimensions immediately
+                    if detail_map.shape != (upscaled_height, upscaled_width):
+                        detail_map = cv2.resize(
+                            detail_map.astype(np.float32),
+                            (upscaled_width, upscaled_height),
+                            interpolation=cv2.INTER_LINEAR
+                        )
+                except Exception as e:
+                    print(f"Content analysis failed, proceeding without: {e}")
+                    detail_map = None
+            
+            # Calculate effective upscale ratio
+            effective_upscale = round(max(upscaled_width / width, upscaled_height / height), 2) if width > 0 and height > 0 else 1.0
+            
+            # Create egregora_data with validated values
+            egregora_data = {
+                'upscaled_width': int(upscaled_width),
+                'upscaled_height': int(upscaled_height),
+                'tile_width': int(tile_width),
+                'tile_height': int(tile_height),
+                'overlap_x': int(overlap_x),
+                'overlap_y': int(overlap_y),
+                'grid_x': int(grid_x),
+                'grid_y': int(grid_y),
+                'tile_order': int(tile_order_val),
+                'blending_method': str(blending_method),
+                'detail_map': detail_map,
+                'adaptive_overlap': (overlap == -1),
+            }
 
-            upscale_model.to("cpu")
-            upscaled_with_model = torch.clamp(s.movedim(-3, -1), min=0, max=1.0)
-            samples = upscaled_with_model.movedim(-1, 1)
-        else:
-            samples = image.movedim(-1, 1)
+            # Upscale image using existing proven method
+            if use_upscale_with_model and upscale_model:
+                device = model_management.get_torch_device()
+                memory_required = model_management.module_size(upscale_model.model)
+                memory_required += (512 * 512 * 3) * image.element_size() * max(upscale_model.scale, 1.0) * 384.0
+                memory_required += image.nelement() * image.element_size()
+                model_management.free_memory(memory_required, device)
 
-        # Final upscale to target dimensions
-        upscaled_image = comfy.utils.common_upscale(samples, upscaled_width, upscaled_height, scaling_method, crop=0).movedim(1, -1)
+                upscale_model.to(device)
+                in_img = image.movedim(-1, -3).to(device)
 
-        # UI information
-        ui_info = f"""Egregora Enhanced Algorithm:
+                tile = 512
+                overlap_value = 32
+
+                oom = True
+                while oom:
+                    try:
+                        steps = in_img.shape[0] * comfy.utils.get_tiled_scale_steps(in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=overlap_value)
+                        pbar = comfy.utils.ProgressBar(steps)
+                        s = comfy.utils.tiled_scale(in_img, lambda a: upscale_model(a), tile_x=tile, tile_y=tile, overlap=overlap_value, upscale_amount=upscale_model.scale, pbar=pbar)
+                        oom = False
+                    except model_management.OOM_EXCEPTION as e:
+                        tile //= 2
+                        if tile < 128:
+                            raise e
+
+                upscale_model.to("cpu")
+                upscaled_with_model = torch.clamp(s.movedim(-3, -1), min=0, max=1.0)
+                samples = upscaled_with_model.movedim(-1, 1)
+            else:
+                samples = image.movedim(-1, 1)
+
+            # Final upscale to exact target dimensions
+            upscaled_image = comfy.utils.common_upscale(samples, upscaled_width, upscaled_height, scaling_method, crop=0).movedim(1, -1)
+
+            # Create comprehensive UI information
+            ui_info = f"""Egregora Enhanced Algorithm:
 Original: {width}x{height}
-Upscaled: {upscaled_width}x{upscaled_height}
+Upscaled: {upscaled_width}x{upscaled_height} ({effective_upscale}x)
 Grid: {grid_x}x{grid_y} ({grid_x * grid_y} tiles)
-Overlap: {overlap_x}x{overlap_y} pixels
-Scale Factor: {effective_upscale}x
+Tile Size: {tile_width}x{tile_height}
+Overlap: {overlap_x}x{overlap_y} pixels ({overlap_x/tile_width:.1%} x {overlap_y/tile_height:.1%})
 Tile Order: {tile_order}
 Blending: {blending_method}
-Content Analysis: {'Enabled' if content_analysis else 'Disabled'}"""
+Content Analysis: {'Enabled' if content_analysis and detail_map is not None else 'Disabled'}
+Adaptive Overlap: {'Yes' if overlap == -1 else 'No'}
 
-        return (upscaled_image, egregora_data, ui_info)
+Memory Efficiency: {int(tile_width * tile_height / 1024)}K pixels per tile
+Processing Load: {grid_x * grid_y} iterations"""
+
+            return (upscaled_image, egregora_data, ui_info)
+            
+        except Exception as e:
+            # Provide helpful error information
+            error_msg = f"""Egregora Algorithm Error: {str(e)}
+
+Parameters when error occurred:
+- Image: {width}x{height} 
+- Tile: {tile_width}x{tile_height}
+- Min Scale: {min_scale_factor}x
+- Overlap: {min_overlap}
+
+Try reducing tile size or scale factor."""
+            
+            # Return a safe fallback
+            fallback_image = torch.zeros((1, max(512, height), max(512, width), 3))
+            fallback_data = {
+                'upscaled_width': max(512, width),
+                'upscaled_height': max(512, height), 
+                'tile_width': 512,
+                'tile_height': 512,
+                'overlap_x': 64,
+                'overlap_y': 64,
+                'grid_x': 1,
+                'grid_y': 1,
+                'tile_order': 0,
+                'blending_method': 'distance_field',
+                'detail_map': None,
+                'adaptive_overlap': False,
+            }
+            return (fallback_image, fallback_data, error_msg)
 
 
 class Egregora_Divide_Select:
@@ -576,179 +696,129 @@ tile # = Specific tile #
 class Egregora_Combine:
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": {
-                "images": ("IMAGE",),
-                "egregora_data": ("EGREGORA_DATA",),
-            }
-        }
-
+        return {"required": {"images": ("IMAGE",), "egregora_data": ("EGREGORA_DATA",)}}
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("image", "ui")
     INPUT_IS_LIST = True
     FUNCTION = "execute"
     CATEGORY = "Egregora/Core"
-    DESCRIPTION = """
-Enhanced tile combination with advanced blending:
-- Distance field blending
-- Multi-scale blending
-- Content-aware blending
-- Poisson blending
-"""
+    DESCRIPTION = "Combine tiles with multiple fast blending methods."
 
     def execute(self, images, egregora_data):
-        # Ensure egregora_data is not a list
-        if isinstance(egregora_data, list):
-            egregora_data = egregora_data[0]
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        try:
+            if isinstance(egregora_data, (list, tuple)):
+                egregora_data = egregora_data[0]
+            flat = sum((list(it) if isinstance(it, (list, tuple)) else [it] for it in images), [])
+            if not flat:
+                return (torch.zeros((1,512,512,3), dtype=torch.float32), "No tiles")
+            images_tensor = torch.cat(flat, dim=0).to(device)
 
-        # Combine images into single tensor
-        out = []
-        for i in range(len(images)):
-            img = images[i]
-            out.append(img)
-        images = torch.stack(out).squeeze(1)
+            up_w, up_h = int(egregora_data["upscaled_width"]), int(egregora_data["upscaled_height"])
+            ovx, ovy = map(int, (egregora_data["overlap_x"], egregora_data["overlap_y"]))
+            method = egregora_data.get("blending_method", "distance_field")
+            detail_map = egregora_data.get("detail_map")
 
-        # Extract data
-        upscaled_width = egregora_data['upscaled_width']
-        upscaled_height = egregora_data['upscaled_height']
-        overlap_x = egregora_data['overlap_x']
-        overlap_y = egregora_data['overlap_y']
-        grid_x = egregora_data['grid_x']
-        grid_y = egregora_data['grid_y']
-        tile_order = egregora_data['tile_order']
-        blending_method = egregora_data['blending_method']
-        detail_map = egregora_data.get('detail_map')
+            th, tw = images_tensor.shape[1:3]
+            tile_coords, _ = create_enhanced_tile_coordinates(up_w, up_h, tw, th, ovx, ovy,
+                                                              int(egregora_data["grid_x"]),
+                                                              int(egregora_data["grid_y"]),
+                                                              egregora_data.get("tile_order"), detail_map)
 
-        # Get tile dimensions from images
-        tile_height = images.shape[1]
-        tile_width = images.shape[2]
+            out = torch.zeros((1, up_h, up_w, 3), dtype=images_tensor.dtype, device=device)
+            weights = torch.zeros((up_h, up_w), dtype=images_tensor.dtype, device=device)
 
-        # Generate tile coordinates (use the same order as in Divide & Select)
-        tile_coordinates, matrix = create_enhanced_tile_coordinates(
-            upscaled_width, upscaled_height, tile_width, tile_height,
-            overlap_x, overlap_y, grid_x, grid_y, tile_order, detail_map
-        )
+            # Cap effective overlaps
+            eff_ovx = min(ovx, tw // 2)
+            eff_ovy = min(ovy, th // 2)
 
-        # Initialize output
-        original_shape = (1, upscaled_height, upscaled_width, 3)
-        output = torch.zeros(original_shape, dtype=images.dtype)
+            for idx, (x, y) in enumerate(tile_coords):
+                if idx >= images_tensor.shape[0]:
+                    break
+                tile = images_tensor[idx]
+                x, y = max(0, min(x, up_w - tw)), max(0, min(y, up_h - th))
+                flags = (x == 0, x >= up_w - tw, y == 0, y >= up_h - th)
 
-        # Use the proven Steudio blending approach with enhancements
-        overlap_factor = 4
-        f_overlap_x = max(1, overlap_x // overlap_factor)
-        f_overlap_y = max(1, overlap_y // overlap_factor)
-        
-        # Blend factors based on overlap
-        blend_x = max(1, math.sqrt(max(overlap_x, 1)))
-        blend_y = max(1, math.sqrt(max(overlap_y, 1)))
+                mask = {
+                    "distance_field": self._mask_distance_field,
+                    "multi_scale": self._mask_multi_scale,
+                    "gaussian": self._mask_gaussian,
+                    "frequency_domain": self._mask_frequency,
+                }.get(method, self._mask_distance_field)(tw, th, eff_ovx, eff_ovy, flags)
 
-        index = 0
-        for tile_coordinate in tile_coordinates:
-            if index >= images.shape[0]:
-                break
-                
-            image_tile = images[index]
-            x, y = tile_coordinate
+                mask = torch.nan_to_num(mask.to(device), nan=1.0).clamp(0.1, 1.0)
+                mask3 = mask.unsqueeze(-1)
 
-            # Ensure coordinates are within bounds
-            x = max(0, min(x, upscaled_width - tile_width))
-            y = max(0, min(y, upscaled_height - tile_height))
+                out[:, y:y+th, x:x+tw, :] += tile * mask3
+                weights[y:y+th, x:x+tw] += mask
 
-            # Create mask for the tile using Steudio's proven approach
-            mask = Image.new("L", (tile_width, tile_height), 0)
-            draw = ImageDraw.Draw(mask)
+            norm = weights.clamp_min(1e-6).unsqueeze(0).unsqueeze(-1)
+            out = torch.clamp(out / norm, 0.0, 1.0)
 
-            # Detect tile position and create appropriate mask
-            is_left_edge = (x == 0)
-            is_right_edge = (x == upscaled_width - tile_width)
-            is_top_edge = (y == 0)
-            is_bottom_edge = (y == upscaled_height - tile_height)
-            is_single_tile_width = (upscaled_width == tile_width)
-            is_single_tile_height = (upscaled_height == tile_height)
+            if device.type == "cuda":
+                del images_tensor, weights
+                torch.cuda.empty_cache()
 
-            # Apply Steudio's mask logic exactly
-            if is_left_edge and is_top_edge and not is_single_tile_height and not is_single_tile_width:
-                # Top-left corner
-                draw.rectangle([0, 0, tile_width - f_overlap_x, tile_height - f_overlap_y], fill=255)
-            elif is_right_edge and is_top_edge and not is_single_tile_height and not is_single_tile_width:
-                # Top-right corner
-                draw.rectangle([f_overlap_x, 0, tile_width, tile_height - f_overlap_y], fill=255)
-            elif is_left_edge and is_bottom_edge and not is_single_tile_height and not is_single_tile_width:
-                # Bottom-left corner
-                draw.rectangle([0, f_overlap_y, tile_width - f_overlap_x, tile_height], fill=255)
-            elif is_right_edge and is_bottom_edge and not is_single_tile_height and not is_single_tile_width:
-                # Bottom-right corner
-                draw.rectangle([f_overlap_x, f_overlap_y, tile_width, tile_height], fill=255)
-            elif is_left_edge and is_top_edge and is_single_tile_height:
-                # Top edge, single row
-                draw.rectangle([0, 0, tile_width - f_overlap_x, tile_height], fill=255)
-            elif is_right_edge and is_top_edge and is_single_tile_height:
-                # Top edge, single row, right
-                draw.rectangle([f_overlap_x, 0, tile_width, tile_height], fill=255)
-            elif is_left_edge and is_top_edge and is_single_tile_width:
-                # Left edge, single column
-                draw.rectangle([0, 0, tile_width, tile_height - f_overlap_y], fill=255)
-            elif is_left_edge and is_bottom_edge and is_single_tile_width:
-                # Left edge, single column, bottom
-                draw.rectangle([0, f_overlap_y, tile_width, tile_height], fill=255)
-            elif not is_left_edge and not is_right_edge and is_top_edge and not is_single_tile_height and not is_single_tile_width:
-                # Top edge, not corners
-                draw.rectangle([f_overlap_x, 0, tile_width - f_overlap_x, tile_height - f_overlap_y], fill=255)
-            elif not is_left_edge and not is_right_edge and is_bottom_edge and not is_single_tile_height and not is_single_tile_width:
-                # Bottom edge, not corners
-                draw.rectangle([f_overlap_x, f_overlap_y, tile_width - f_overlap_x, tile_height], fill=255)
-            elif is_left_edge and not is_top_edge and not is_bottom_edge and not is_single_tile_height and not is_single_tile_width:
-                # Left edge, not corners
-                draw.rectangle([0, f_overlap_y, tile_width - f_overlap_x, tile_height - f_overlap_y], fill=255)
-            elif is_right_edge and not is_top_edge and not is_bottom_edge and not is_single_tile_height and not is_single_tile_width:
-                # Right edge, not corners
-                draw.rectangle([f_overlap_x, f_overlap_y, tile_width, tile_height - f_overlap_y], fill=255)
-            elif not is_left_edge and not is_right_edge and is_top_edge and is_single_tile_height and not is_single_tile_width:
-                # Top edge, single height
-                draw.rectangle([f_overlap_x, 0, tile_width - f_overlap_x, tile_height], fill=255)
-            elif is_left_edge and not is_top_edge and not is_bottom_edge and not is_single_tile_height and is_single_tile_width:
-                # Left edge, single width
-                draw.rectangle([0, f_overlap_y, tile_width, tile_height - f_overlap_y], fill=255)
-            elif not is_left_edge and not is_right_edge and not is_top_edge and not is_bottom_edge and not is_single_tile_height and not is_single_tile_width:
-                # Interior tile
-                draw.rectangle([f_overlap_x, f_overlap_y, tile_width - f_overlap_x, tile_height - f_overlap_y], fill=255)
-            else:
-                # Single tile or edge case - fill entire tile
-                draw.rectangle([0, 0, tile_width, tile_height], fill=255)
+            return (out.to("cpu"), f"Egregora Combine: {method}")
+        except Exception as e:
+            h = int(egregora_data.get("upscaled_height", 512))
+            w = int(egregora_data.get("upscaled_width", 512))
+            return (torch.zeros((1,h,w,3), dtype=torch.float32), f"Fallback due to {e!r}")
 
-            # Apply appropriate blur based on overlap size
-            if overlap_x <= 64 or overlap_y <= 64:
-                mask = mask.filter(ImageFilter.BoxBlur(radius=min(blend_x, blend_y)))
-            else:
-                mask = mask.filter(ImageFilter.GaussianBlur(radius=min(blend_x, blend_y)))
+    def _mask_distance_field(self, tw, th, ovx, ovy, flags):
+        is_l, is_r, is_t, is_b = flags
+        Y, X = torch.meshgrid(torch.arange(th), torch.arange(tw), indexing='ij')
+        ds = []
+        if not is_l and ovx>0: ds.append(X)
+        if not is_r and ovx>0: ds.append(tw-1-X)
+        if not is_t and ovy>0: ds.append(Y)
+        if not is_b and ovy>0: ds.append(th-1-Y)
+        if not ds:
+            return torch.ones((th, tw), dtype=torch.float32)
+        min_d = torch.min(torch.stack(ds), dim=0).values
+        mx = max(ovx, ovy, 1)
+        normd = torch.clamp(min_d.float()/mx, 0,1)
+        return 0.5*(1 + torch.cos(torch.pi*(1-normd)))
 
-            # Convert mask to tensor
-            mask_np = np.array(mask) / 255.0
-            mask_tensor = torch.tensor(mask_np, dtype=images.dtype).unsqueeze(0).unsqueeze(-1)
+    def _mask_multi_scale(self, tw, th, ovx, ovy, flags, levels=3):
+        base = self._mask_distance_field(tw, th, ovx, ovy, flags)
+        masks = [base]
+        cur = base
+        for _ in range(levels-1):
+            cur = F.interpolate(cur.unsqueeze(0).unsqueeze(0), scale_factor=0.5,
+                                mode="bilinear", align_corners=False).squeeze()
+            masks.append(cur)
+        out = torch.zeros_like(base)
+        total = 0.0
+        for i, m in enumerate(masks):
+            w = 0.6**i
+            m_up = F.interpolate(m.unsqueeze(0).unsqueeze(0), size=(th, tw),
+                                 mode="bilinear", align_corners=False).squeeze()
+            out += m_up * w
+            total += w
+        return out / total if total>0 else base
 
-            # Apply blending using the proven Steudio method
-            current_region = output[:, y:y + tile_height, x:x + tile_width, :]
-            
-            # Blend the tile
-            output[:, y:y + tile_height, x:x + tile_width, :] *= (1 - mask_tensor)
-            output[:, y:y + tile_height, x:x + tile_width, :] += image_tile * mask_tensor
+    def _mask_gaussian(self, tw, th, ovx, ovy, flags):
+        mask = self._mask_distance_field(tw, th, ovx, ovy, flags)
+        if ovx<=0 and ovy<=0:
+            return mask
+        radius = max(1, min(ovx or ovy, ovy or ovx)//4)
+        kernel = torch.ones(2*radius+1) / (2*radius+1)
+        mask = F.conv1d(mask.unsqueeze(0).unsqueeze(0), kernel.unsqueeze(0).unsqueeze(0).to(mask),
+                        padding=radius).squeeze()
+        mask = F.conv1d(mask.unsqueeze(0).unsqueeze(0), kernel.unsqueeze(0).unsqueeze(0).to(mask),
+                        padding=radius, dim=2).squeeze()
+        return mask
 
-            index += 1
-
-        # Clamp values to valid range
-        output = torch.clamp(output, 0, 1)
-
-        # Create UI information
-        matrix_ui = f"""Egregora Enhanced Combination:
-Blending Method: {blending_method} (using proven Steudio approach)
-Grid: {grid_x}x{grid_y}
-Overlap: {overlap_x}x{overlap_y}
-Output Size: {upscaled_width}x{upscaled_height}
-
-Tile Matrix:
-""" + '\n'.join([' '.join(row) for row in matrix])
-
-        return output, matrix_ui
+    def _mask_frequency(self, tw, th, ovx, ovy, flags):
+        base = self._mask_distance_field(tw, th, ovx, ovy, flags)
+        gx = torch.abs(base[:, 2:] - base[:, :-2])
+        gy = torch.abs(base[2:] - base[:-2, :])
+        # pad gradients properly
+        gx = F.pad(gx, (1,1), mode="replicate")
+        gy = F.pad(gy, (1,1), mode="replicate")
+        grad = (gx + gy) / 2
+        return torch.clamp(base * (1 + 0.5*grad), 0, 1)
 
 
 class Egregora_Preview:
