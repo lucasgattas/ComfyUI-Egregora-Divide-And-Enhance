@@ -123,8 +123,7 @@ comfyui-egregora-divide-and-enhance/
 ├─ egregora_divide_and_enhance.py
 ├─ README.md  ← you are here
 ├─ examples/
-│  └─ egregora_turbo_prompt_sdxl.json
-└─ Images/   ← optional screenshots (e.g., workflow_example.png)
+└─  └─ divide_and_enhance_example_workflow.json
 ```
 
 ---
