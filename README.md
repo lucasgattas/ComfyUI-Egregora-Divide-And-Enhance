@@ -12,7 +12,7 @@
 
 ## ✨ What is this?
 
-**Egregora: Divide & Enhance** is a small suite of custom nodes that help you **split, enhance, and recombine** images, plus a clean **two‑slider SDXL prompt mixer** that keeps things simple while staying robust with lot´s of customization.
+**Egregora: Divide & Enhance** is a small suite of custom nodes that help you **split, enhance, and recombine** images, plus a clean **SDXL prompt mixer** that keeps things simple while staying robust with lot´s of customization.
 
 Inspired by **Steudio’s Divide & Conquer** nodes, adapted and refactored to fit a streamlined upscaling workflow. 🧠✂️🧵
 
@@ -22,12 +22,19 @@ Inspired by **Steudio’s Divide & Conquer** nodes, adapted and refactored to fi
 
 ### 🚀 Egregora Turbo Prompt
 
-Two prompts, two sliders; done. One for **captioning** (e.g., Florence2) and one for **Global** positive/negative prompts. Builds **SDXL‑ready CONDITIONING** with:
+A minimal, predictable prompt builder:
 
-* auto‑read **size** from LATENT (ADM: width/height/target/crop),
-* proper **pooled\_output** handling (1280‑d),
-* **combine‑style** mixing (cleaner than embedding averages),
-* optional **negative** and a simple **blacklist** (remove words from caption).
+* **Positive** = `caption_text + global_positive_prompt` (plain concatenation; no weights).
+* **Negative** = `global_negative_prompt` only.
+* **Blacklist (optional):** removes whole‑word, case‑insensitive terms from the positive text before encoding.
+* Outputs **SDXL‑compatible CONDITIONING** with proper **`pooled_output`**.
+
+**Typical wiring**
+
+* `caption_text` ← captioner (e.g., Florence2)
+* `global_positive_prompt` ← styles/quality you always want
+* `global_negative_prompt` ← artifacts to avoid
+* `blacklist_words` ← optional removals
 
 ### 🧠 Egregora Algorithm
 
@@ -76,8 +83,7 @@ git clone https://github.com/lucasgattas/comfyui-egregora-divide-and-enhance.git
 
    * *caption\_text* = your main description
    * *global\_positive\_prompt* = secondary style or theme
-   * *caption\_strength* / *global\_strength* = only two sliders you need
-   * (wire **latent** here so ADM size auto‑matches your sampler resolution)
+   * *blacklist_words* = clean words from positive prompt (caption and global)
 3. **KSampler** (Euler/Karras or your favorite)
 
    * Positive/Negative from Turbo Prompt, model & latent as usual.
