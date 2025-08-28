@@ -22,7 +22,7 @@ Inspired by **Steudio’s Divide & Conquer** nodes, adapted and refactored to fi
 
 ### 🚀 Egregora Turbo Prompt
 
-Two prompts, two sliders—done. One for **captioning** (e.g., Florence2) and one for **Global** positive/negative prompts. Builds **SDXL‑ready CONDITIONING** with:
+Two prompts, two sliders; done. One for **captioning** (e.g., Florence2) and one for **Global** positive/negative prompts. Builds **SDXL‑ready CONDITIONING** with:
 
 * auto‑read **size** from LATENT (ADM: width/height/target/crop),
 * proper **pooled\_output** handling (1280‑d),
