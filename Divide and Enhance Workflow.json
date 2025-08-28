@@ -1,0 +1,1523 @@
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "revision": 0,
+  "last_node_id": 332,
+  "last_link_id": 1432,
+  "nodes": [
+    {
+      "id": 128,
+      "type": "ControlNetLoader",
+      "pos": [
+        3621.777587890625,
+        1012.0242309570312
+      ],
+      "size": [
+        317.96490478515625,
+        58
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CONTROL_NET",
+          "type": "CONTROL_NET",
+          "links": [
+            1129
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "ControlNetLoader"
+      },
+      "widgets_values": [
+        "diffusion_pytorch_model.safetensors"
+      ]
+    },
+    {
+      "id": 175,
+      "type": "Image Comparer (rgthree)",
+      "pos": [
+        4007.916259765625,
+        301.574951171875
+      ],
+      "size": [
+        644.1924438476562,
+        650.5580444335938
+      ],
+      "flags": {},
+      "order": 24,
+      "mode": 0,
+      "inputs": [
+        {
+          "dir": 3,
+          "name": "image_a",
+          "type": "IMAGE",
+          "link": 707
+        },
+        {
+          "dir": 3,
+          "name": "image_b",
+          "type": "IMAGE",
+          "link": 1362
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "rgthree-comfy",
+        "ver": "1.0.2508012353",
+        "comparer_mode": "Slide"
+      },
+      "widgets_values": [
+        [
+          {
+            "name": "A",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_hvumv_00045_.png&type=temp&subfolder=&rand=0.3581834980260872"
+          },
+          {
+            "name": "B",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_hvumv_00046_.png&type=temp&subfolder=&rand=0.0351250035213424"
+          }
+        ]
+      ]
+    },
+    {
+      "id": 40,
+      "type": "DownloadAndLoadFlorence2Model",
+      "pos": [
+        3153.078125,
+        551.81787109375
+      ],
+      "size": [
+        397.429443359375,
+        131.3590545654297
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "lora",
+          "shape": 7,
+          "type": "PEFTLORA",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "florence2_model",
+          "type": "FL2MODEL",
+          "links": [
+            16
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-florence2",
+        "ver": "00b63382966a444a9fefacb65b8deb188d12a458",
+        "Node name for S&R": "DownloadAndLoadFlorence2Model"
+      },
+      "widgets_values": [
+        "MiaoshouAI/Florence-2-large-PromptGen-v2.0",
+        "fp16",
+        "sdpa",
+        false
+      ]
+    },
+    {
+      "id": 308,
+      "type": "KSamplerSelect",
+      "pos": [
+        4039.296630859375,
+        1435.370849609375
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "SAMPLER",
+          "type": "SAMPLER",
+          "links": [
+            1365
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "KSamplerSelect"
+      },
+      "widgets_values": [
+        "lcm"
+      ]
+    },
+    {
+      "id": 305,
+      "type": "VAEDecode",
+      "pos": [
+        4325.16845703125,
+        1020.5709228515625
+      ],
+      "size": [
+        140,
+        46
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 1372
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 1343
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1407
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 310,
+      "type": "Egregora Analyze Content",
+      "pos": [
+        2799.5078125,
+        222.28448486328125
+      ],
+      "size": [
+        286.013427734375,
+        73.95226287841797
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1377
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": null
+        },
+        {
+          "name": "image_target",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "detail_map",
+          "type": "IMAGE",
+          "links": [
+            1378
+          ]
+        },
+        {
+          "name": "ui",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "name": "analysis_data",
+          "type": "EGREGORA_ANALYSIS",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Egregora Analyze Content"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 304,
+      "type": "Egregora Divide and Select",
+      "pos": [
+        2796.17919921875,
+        352.5970153808594
+      ],
+      "size": [
+        296.7229309082031,
+        78
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1347
+        },
+        {
+          "name": "egregora_data",
+          "type": "EGREGORA_DATA",
+          "link": 1349
+        }
+      ],
+      "outputs": [
+        {
+          "name": "TILE(S)",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": [
+            1351,
+            1352,
+            1359,
+            1363,
+            1374,
+            1377,
+            1406
+          ]
+        },
+        {
+          "name": "ui",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Egregora Divide and Select"
+      },
+      "widgets_values": [
+        0
+      ]
+    },
+    {
+      "id": 50,
+      "type": "PreviewImage",
+      "pos": [
+        3192.119140625,
+        35.29571533203125
+      ],
+      "size": [
+        323.8871765136719,
+        465.6373291015625
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1359
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 33,
+      "type": "ImageResizeKJv2",
+      "pos": [
+        2417.3125,
+        661.066650390625
+      ],
+      "size": [
+        317.068359375,
+        348
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1416
+        },
+        {
+          "name": "mask",
+          "shape": 7,
+          "type": "MASK",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1345
+          ]
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "links": []
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": []
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-kjnodes",
+        "ver": "1.1.3",
+        "Node name for S&R": "ImageResizeKJv2"
+      },
+      "widgets_values": [
+        1440,
+        1440,
+        "lanczos",
+        "resize",
+        "0, 0, 0",
+        "center",
+        0,
+        "cpu",
+        "<tr><td>Output: </td><td><b>1</b> x <b>1440</b> x <b>1440 | 23.73MB</b></td></tr>"
+      ]
+    },
+    {
+      "id": 31,
+      "type": "LoadImage",
+      "pos": [
+        2403.414306640625,
+        275.2957458496094
+      ],
+      "size": [
+        347.0212707519531,
+        326
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            707,
+            1416
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "frogwifhalowrest.jpg",
+        "image"
+      ]
+    },
+    {
+      "id": 311,
+      "type": "Egregora Preview",
+      "pos": [
+        2798.3447265625,
+        39.70676040649414
+      ],
+      "size": [
+        287.63726806640625,
+        126
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1374
+        },
+        {
+          "name": "egregora_data",
+          "type": "EGREGORA_DATA",
+          "link": 1375
+        }
+      ],
+      "outputs": [
+        {
+          "name": "preview",
+          "type": "IMAGE",
+          "links": [
+            1411
+          ]
+        },
+        {
+          "name": "ui",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Egregora Preview"
+      },
+      "widgets_values": [
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "id": 271,
+      "type": "VAEEncode",
+      "pos": [
+        3784.469970703125,
+        917.1453247070312
+      ],
+      "size": [
+        149.04483032226562,
+        48.71345901489258
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pixels",
+          "type": "IMAGE",
+          "link": 1351
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 1232
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            1369,
+            1399
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "VAEEncode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 320,
+      "type": "Egregora Turbo Prompt",
+      "pos": [
+        3629.658447265625,
+        577.5692749023438
+      ],
+      "size": [
+        314.42767333984375,
+        285.3591003417969
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 1432
+        },
+        {
+          "name": "caption_text",
+          "type": "STRING",
+          "link": 1428
+        },
+        {
+          "name": "latent",
+          "shape": 7,
+          "type": "LATENT",
+          "link": 1399
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive_conditioning",
+          "type": "CONDITIONING",
+          "links": [
+            1402
+          ]
+        },
+        {
+          "name": "negative_conditioning",
+          "type": "CONDITIONING",
+          "links": [
+            1403
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Egregora Turbo Prompt"
+      },
+      "widgets_values": [
+        "highly detailed, sharp details, sharp focus, high quality, amazing quality, realistic, professional image",
+        "",
+        "",
+        1.0000000000000002,
+        0.7000000000000002
+      ]
+    },
+    {
+      "id": 312,
+      "type": "PreviewImage",
+      "pos": [
+        3539.25341796875,
+        37.05058288574219
+      ],
+      "size": [
+        325.25384521484375,
+        465.22540283203125
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1378
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 323,
+      "type": "PreviewImage",
+      "pos": [
+        3191.80029296875,
+        -450.4715270996094
+      ],
+      "size": [
+        320.7314758300781,
+        437.1866760253906
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1411
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 37,
+      "type": "CLIPSetLastLayer",
+      "pos": [
+        3149.328125,
+        1135.006103515625
+      ],
+      "size": [
+        403.75634765625,
+        58
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 12
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            1432
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "CLIPSetLastLayer"
+      },
+      "widgets_values": [
+        -2
+      ]
+    },
+    {
+      "id": 246,
+      "type": "ControlNetApplyAdvanced",
+      "pos": [
+        3623.636474609375,
+        1110.697021484375
+      ],
+      "size": [
+        316.846923828125,
+        186
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 1402
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 1403
+        },
+        {
+          "name": "control_net",
+          "type": "CONTROL_NET",
+          "link": 1129
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1363
+        },
+        {
+          "name": "vae",
+          "shape": 7,
+          "type": "VAE",
+          "link": 1131
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "links": [
+            1404
+          ]
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "links": [
+            1405
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "ControlNetApplyAdvanced"
+      },
+      "widgets_values": [
+        0.4000000000000001,
+        0,
+        1
+      ]
+    },
+    {
+      "id": 39,
+      "type": "Florence2Run",
+      "pos": [
+        3153.214111328125,
+        726.6428833007812
+      ],
+      "size": [
+        400,
+        364
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1352
+        },
+        {
+          "name": "florence2_model",
+          "type": "FL2MODEL",
+          "link": 16
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "caption",
+          "type": "STRING",
+          "links": [
+            1428
+          ]
+        },
+        {
+          "name": "data",
+          "type": "JSON",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-florence2",
+        "ver": "00b63382966a444a9fefacb65b8deb188d12a458",
+        "Node name for S&R": "Florence2Run"
+      },
+      "widgets_values": [
+        "",
+        "detailed_caption",
+        false,
+        true,
+        128,
+        2,
+        true,
+        "",
+        1125899906842624,
+        "fixed"
+      ]
+    },
+    {
+      "id": 302,
+      "type": "Egregora Algorithm",
+      "pos": [
+        2796.6044921875,
+        478.64453125
+      ],
+      "size": [
+        298.75390625,
+        290
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1345
+        },
+        {
+          "name": "upscale_model",
+          "shape": 7,
+          "type": "UPSCALE_MODEL",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1347
+          ]
+        },
+        {
+          "name": "egregora_data",
+          "type": "EGREGORA_DATA",
+          "links": [
+            1349,
+            1360,
+            1375
+          ]
+        },
+        {
+          "name": "ui",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Egregora Algorithm"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        "1/4 Tile",
+        1,
+        "serpentine",
+        "lanczos",
+        "poisson",
+        true,
+        false
+      ]
+    },
+    {
+      "id": 191,
+      "type": "PreviewImage",
+      "pos": [
+        4666.70263671875,
+        311.8422546386719
+      ],
+      "size": [
+        654.8405151367188,
+        652.172119140625
+      ],
+      "flags": {},
+      "order": 23,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1361
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 321,
+      "type": "ColorMatch",
+      "pos": [
+        4419.283203125,
+        1137.0225830078125
+      ],
+      "size": [
+        270,
+        102
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image_ref",
+          "type": "IMAGE",
+          "link": 1406
+        },
+        {
+          "name": "image_target",
+          "type": "IMAGE",
+          "link": 1407
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            1409
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-kjnodes",
+        "ver": "1.1.3",
+        "Node name for S&R": "ColorMatch"
+      },
+      "widgets_values": [
+        "hm",
+        1.0000000000000002
+      ]
+    },
+    {
+      "id": 300,
+      "type": "Egregora Combine",
+      "pos": [
+        4475.07763671875,
+        1019.6769409179688
+      ],
+      "size": [
+        212.03866577148438,
+        66
+      ],
+      "flags": {},
+      "order": 22,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1409
+        },
+        {
+          "name": "egregora_data",
+          "type": "EGREGORA_DATA",
+          "link": 1360
+        },
+        {
+          "name": "tiles",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            1361,
+            1362
+          ]
+        },
+        {
+          "name": "ui",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Egregora Combine"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 41,
+      "type": "CheckpointLoaderSimple",
+      "pos": [
+        2774.2255859375,
+        816.7869262695312
+      ],
+      "size": [
+        340.5673828125,
+        98
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            1430,
+            1431
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 1,
+          "links": [
+            12
+          ]
+        },
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 2,
+          "links": [
+            1131,
+            1232,
+            1343
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.29",
+        "Node name for S&R": "CheckpointLoaderSimple",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "jibMixIllustrious_v20Revelation.safetensors"
+      ]
+    },
+    {
+      "id": 307,
+      "type": "BasicScheduler",
+      "pos": [
+        4039.976318359375,
+        1290.627685546875
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1431
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": [
+            1364
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "BasicScheduler"
+      },
+      "widgets_values": [
+        "beta",
+        15,
+        0.6500000000000001
+      ]
+    },
+    {
+      "id": 306,
+      "type": "SamplerCustom",
+      "pos": [
+        4038.63623046875,
+        1020.6445922851562
+      ],
+      "size": [
+        270,
+        230
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1430
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 1404
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 1405
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 1365
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": 1364
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 1369
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "LATENT",
+          "links": null
+        },
+        {
+          "name": "denoised_output",
+          "type": "LATENT",
+          "links": [
+            1372
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.49",
+        "Node name for S&R": "SamplerCustom"
+      },
+      "widgets_values": [
+        true,
+        688619467875313,
+        "fixed",
+        4
+      ]
+    }
+  ],
+  "links": [
+    [
+      12,
+      41,
+      1,
+      37,
+      0,
+      "CLIP"
+    ],
+    [
+      16,
+      40,
+      0,
+      39,
+      1,
+      "FL2MODEL"
+    ],
+    [
+      707,
+      31,
+      0,
+      175,
+      0,
+      "IMAGE"
+    ],
+    [
+      1129,
+      128,
+      0,
+      246,
+      2,
+      "CONTROL_NET"
+    ],
+    [
+      1131,
+      41,
+      2,
+      246,
+      4,
+      "VAE"
+    ],
+    [
+      1232,
+      41,
+      2,
+      271,
+      1,
+      "VAE"
+    ],
+    [
+      1343,
+      41,
+      2,
+      305,
+      1,
+      "VAE"
+    ],
+    [
+      1345,
+      33,
+      0,
+      302,
+      0,
+      "IMAGE"
+    ],
+    [
+      1347,
+      302,
+      0,
+      304,
+      0,
+      "IMAGE"
+    ],
+    [
+      1349,
+      302,
+      1,
+      304,
+      1,
+      "EGREGORA_DATA"
+    ],
+    [
+      1351,
+      304,
+      0,
+      271,
+      0,
+      "IMAGE"
+    ],
+    [
+      1352,
+      304,
+      0,
+      39,
+      0,
+      "IMAGE"
+    ],
+    [
+      1359,
+      304,
+      0,
+      50,
+      0,
+      "IMAGE"
+    ],
+    [
+      1360,
+      302,
+      1,
+      300,
+      1,
+      "EGREGORA_DATA"
+    ],
+    [
+      1361,
+      300,
+      0,
+      191,
+      0,
+      "IMAGE"
+    ],
+    [
+      1362,
+      300,
+      0,
+      175,
+      1,
+      "IMAGE"
+    ],
+    [
+      1363,
+      304,
+      0,
+      246,
+      3,
+      "IMAGE"
+    ],
+    [
+      1364,
+      307,
+      0,
+      306,
+      4,
+      "SIGMAS"
+    ],
+    [
+      1365,
+      308,
+      0,
+      306,
+      3,
+      "SAMPLER"
+    ],
+    [
+      1369,
+      271,
+      0,
+      306,
+      5,
+      "LATENT"
+    ],
+    [
+      1372,
+      306,
+      1,
+      305,
+      0,
+      "LATENT"
+    ],
+    [
+      1374,
+      304,
+      0,
+      311,
+      0,
+      "IMAGE"
+    ],
+    [
+      1375,
+      302,
+      1,
+      311,
+      1,
+      "EGREGORA_DATA"
+    ],
+    [
+      1377,
+      304,
+      0,
+      310,
+      0,
+      "IMAGE"
+    ],
+    [
+      1378,
+      310,
+      0,
+      312,
+      0,
+      "IMAGE"
+    ],
+    [
+      1399,
+      271,
+      0,
+      320,
+      2,
+      "LATENT"
+    ],
+    [
+      1402,
+      320,
+      0,
+      246,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      1403,
+      320,
+      1,
+      246,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      1404,
+      246,
+      0,
+      306,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      1405,
+      246,
+      1,
+      306,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      1406,
+      304,
+      0,
+      321,
+      0,
+      "IMAGE"
+    ],
+    [
+      1407,
+      305,
+      0,
+      321,
+      1,
+      "IMAGE"
+    ],
+    [
+      1409,
+      321,
+      0,
+      300,
+      0,
+      "IMAGE"
+    ],
+    [
+      1411,
+      311,
+      0,
+      323,
+      0,
+      "IMAGE"
+    ],
+    [
+      1416,
+      31,
+      0,
+      33,
+      0,
+      "IMAGE"
+    ],
+    [
+      1428,
+      39,
+      2,
+      320,
+      1,
+      "STRING"
+    ],
+    [
+      1430,
+      41,
+      0,
+      306,
+      0,
+      "MODEL"
+    ],
+    [
+      1431,
+      41,
+      0,
+      307,
+      0,
+      "MODEL"
+    ],
+    [
+      1432,
+      37,
+      0,
+      320,
+      0,
+      "CLIP"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.4305676431342469,
+      "offset": [
+        -1544.3439474136335,
+        549.375817868047
+      ]
+    },
+    "frontendVersion": "1.23.4"
+  },
+  "version": 0.4
+}
