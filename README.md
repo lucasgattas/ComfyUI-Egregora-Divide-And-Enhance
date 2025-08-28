@@ -76,7 +76,7 @@ git clone https://github.com/lucasgattas/comfyui-egregora-divide-and-enhance.git
    * *global\_positive\_prompt* = secondary style or theme
    * *caption\_strength* / *global\_strength* = only two sliders you need
    * (wire **latent** here so ADM size auto‑matches your sampler resolution)
-3. **KSampler** (LCM/DMD2 or your favorite)
+3. **KSampler** (Euler/Karras or your favorite)
 
    * Positive/Negative from Turbo Prompt, model & latent as usual.
 4. **VAE Decode** → **Preview / Save**
@@ -92,7 +92,7 @@ git clone https://github.com/lucasgattas/comfyui-egregora-divide-and-enhance.git
 
 * Keep prompts **concise**; long texts dilute signal.
 * For realism vs. cartoon conflicts, add targeted **negatives** (e.g., `cartoon, plush, chibi`) so the portrait holds shape while the global style adds texture/color.
-* Low‑step samplers (e.g., **LCM + DMD2**) work: Turbo Prompt avoids fragile scheduling and mixes prompts via multiple conditionings (sampler‑level combine).
+* Turbo Prompt avoids fragile scheduling and mixes prompts via multiple conditionings (sampler‑level combine).
 
 ---
 
