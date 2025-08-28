@@ -1,8 +1,8 @@
 {
   "id": "00000000-0000-0000-0000-000000000000",
   "revision": 0,
-  "last_node_id": 332,
-  "last_link_id": 1432,
+  "last_node_id": 333,
+  "last_link_id": 1436,
   "nodes": [
     {
       "id": 128,
@@ -255,6 +255,8 @@
         }
       ],
       "properties": {
+        "aux_id": "lucasgattas/comfyui-egregora-divide-and-enhance",
+        "ver": "950d794456cb9690f6df7518462359d6bd317ace",
         "Node name for S&R": "Egregora Analyze Content"
       },
       "widgets_values": []
@@ -307,6 +309,8 @@
         }
       ],
       "properties": {
+        "aux_id": "lucasgattas/comfyui-egregora-divide-and-enhance",
+        "ver": "950d794456cb9690f6df7518462359d6bd317ace",
         "Node name for S&R": "Egregora Divide and Select"
       },
       "widgets_values": [
@@ -406,8 +410,7 @@
         "0, 0, 0",
         "center",
         0,
-        "cpu",
-        "<tr><td>Output: </td><td><b>1</b> x <b>1440</b> x <b>1440 | 23.73MB</b></td></tr>"
+        "cpu"
       ]
     },
     {
@@ -491,6 +494,8 @@
         }
       ],
       "properties": {
+        "aux_id": "lucasgattas/comfyui-egregora-divide-and-enhance",
+        "ver": "950d794456cb9690f6df7518462359d6bd317ace",
         "Node name for S&R": "Egregora Preview"
       },
       "widgets_values": [
@@ -530,8 +535,7 @@
           "name": "LATENT",
           "type": "LATENT",
           "links": [
-            1369,
-            1399
+            1369
           ]
         }
       ],
@@ -541,65 +545,6 @@
         "Node name for S&R": "VAEEncode"
       },
       "widgets_values": []
-    },
-    {
-      "id": 320,
-      "type": "Egregora Turbo Prompt",
-      "pos": [
-        3629.658447265625,
-        577.5692749023438
-      ],
-      "size": [
-        314.42767333984375,
-        285.3591003417969
-      ],
-      "flags": {},
-      "order": 15,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 1432
-        },
-        {
-          "name": "caption_text",
-          "type": "STRING",
-          "link": 1428
-        },
-        {
-          "name": "latent",
-          "shape": 7,
-          "type": "LATENT",
-          "link": 1399
-        }
-      ],
-      "outputs": [
-        {
-          "name": "positive_conditioning",
-          "type": "CONDITIONING",
-          "links": [
-            1402
-          ]
-        },
-        {
-          "name": "negative_conditioning",
-          "type": "CONDITIONING",
-          "links": [
-            1403
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "Egregora Turbo Prompt"
-      },
-      "widgets_values": [
-        "highly detailed, sharp details, sharp focus, high quality, amazing quality, realistic, professional image",
-        "",
-        "",
-        1.0000000000000002,
-        0.7000000000000002
-      ]
     },
     {
       "id": 312,
@@ -685,7 +630,7 @@
           "name": "CLIP",
           "type": "CLIP",
           "links": [
-            1432
+            1433
           ]
         }
       ],
@@ -716,12 +661,12 @@
         {
           "name": "positive",
           "type": "CONDITIONING",
-          "link": 1402
+          "link": 1435
         },
         {
           "name": "negative",
           "type": "CONDITIONING",
-          "link": 1403
+          "link": 1436
         },
         {
           "name": "control_net",
@@ -808,7 +753,7 @@
           "name": "caption",
           "type": "STRING",
           "links": [
-            1428
+            1434
           ]
         },
         {
@@ -886,6 +831,8 @@
         }
       ],
       "properties": {
+        "aux_id": "lucasgattas/comfyui-egregora-divide-and-enhance",
+        "ver": "950d794456cb9690f6df7518462359d6bd317ace",
         "Node name for S&R": "Egregora Algorithm"
       },
       "widgets_values": [
@@ -1021,6 +968,8 @@
         }
       ],
       "properties": {
+        "aux_id": "lucasgattas/comfyui-egregora-divide-and-enhance",
+        "ver": "950d794456cb9690f6df7518462359d6bd317ace",
         "Node name for S&R": "Egregora Combine"
       },
       "widgets_values": []
@@ -1190,6 +1139,59 @@
         688619467875313,
         "fixed",
         4
+      ]
+    },
+    {
+      "id": 333,
+      "type": "Egregora Turbo Prompt",
+      "pos": [
+        3639.074462890625,
+        570.3360595703125
+      ],
+      "size": [
+        291.9523010253906,
+        305.0204772949219
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 1433
+        },
+        {
+          "name": "caption_text",
+          "type": "STRING",
+          "link": 1434
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive_conditioning",
+          "type": "CONDITIONING",
+          "links": [
+            1435
+          ]
+        },
+        {
+          "name": "negative_conditioning",
+          "type": "CONDITIONING",
+          "links": [
+            1436
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "lucasgattas/comfyui-egregora-divide-and-enhance",
+        "ver": "950d794456cb9690f6df7518462359d6bd317ace",
+        "Node name for S&R": "Egregora Turbo Prompt"
+      },
+      "widgets_values": [
+        "",
+        "",
+        ""
       ]
     }
   ],
@@ -1395,30 +1397,6 @@
       "IMAGE"
     ],
     [
-      1399,
-      271,
-      0,
-      320,
-      2,
-      "LATENT"
-    ],
-    [
-      1402,
-      320,
-      0,
-      246,
-      0,
-      "CONDITIONING"
-    ],
-    [
-      1403,
-      320,
-      1,
-      246,
-      1,
-      "CONDITIONING"
-    ],
-    [
       1404,
       246,
       0,
@@ -1475,14 +1453,6 @@
       "IMAGE"
     ],
     [
-      1428,
-      39,
-      2,
-      320,
-      1,
-      "STRING"
-    ],
-    [
       1430,
       41,
       0,
@@ -1499,22 +1469,46 @@
       "MODEL"
     ],
     [
-      1432,
+      1433,
       37,
       0,
-      320,
+      333,
       0,
       "CLIP"
+    ],
+    [
+      1434,
+      39,
+      2,
+      333,
+      1,
+      "STRING"
+    ],
+    [
+      1435,
+      333,
+      0,
+      246,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      1436,
+      333,
+      1,
+      246,
+      1,
+      "CONDITIONING"
     ]
   ],
   "groups": [],
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.4305676431342469,
+      "scale": 0.47362440744767204,
       "offset": [
-        -1544.3439474136335,
-        549.375817868047
+        -1810.9145327481988,
+        383.86266696562785
       ]
     },
     "frontendVersion": "1.23.4"
