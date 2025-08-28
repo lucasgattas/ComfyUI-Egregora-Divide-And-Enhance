@@ -12,7 +12,7 @@
 
 ## ✨ What is this?
 
-**Egregora** is a small suite of custom nodes that help you **split, enhance, and recombine** images—plus a clean **two‑slider SDXL prompt mixer** that keeps things simple while staying robust for low‑step samplers.
+**Egregora: Divide & Enhance** is a small suite of custom nodes that help you **split, enhance, and recombine** images, plus a clean **two‑slider SDXL prompt mixer** that keeps things simple while staying robust with lot´s of customization.
 
 Inspired by **Steudio’s Divide & Conquer** nodes, adapted and refactored to fit a streamlined upscaling workflow. 🧠✂️🧵
 
@@ -31,7 +31,7 @@ Two prompts, two sliders—done. One for **captioning** (e.g., Florence2) and on
 
 ### 🧠 Egregora Algorithm
 
-Planner for Divide‑and‑Conquer upscaling. Computes tile layout given target size & overlap; supports tile ordering strategies and sensible defaults to avoid seams.
+Planner for Divide‑and‑Enhance upscaling. Computes tile layout given target size & overlap; supports tile ordering strategies and sensible defaults to avoid seams.
 
 ### ✂️ Egregora Divide & Select
 
@@ -43,7 +43,7 @@ Merges processed tiles back into a seamless image using robust blending (distanc
 
 ### 👁️ Egregora Preview
 
-Visual overlay to preview the tile grid, overlaps, and order—verify the plan before you spend compute.
+Visual overlay to preview the tile grid, overlaps, and order, verify the plan before you spend compute.
 
 ### 🔍 Egregora Content Analysis *(optional)*
 
@@ -93,7 +93,7 @@ Use **Algorithm → Divide & Select → \[process tiles] → Combine**. Start wi
 <img width="1130" height="742" alt="Captura de tela 2025-08-27 220324" src="https://github.com/user-attachments/assets/91735827-b882-45d7-bf17-d90fd23ed100" />
 
 * **Download:** `examples/divide_and_enhance_example_workflow.json` (included in this repo).
-* **Import:** ComfyUI → Queue (☰) → **Load** → pick the JSON.
+* **Import:** ComfyUI → Queue (☰) → **Load** → pick the JSON, or just drag it inside.
 
 > **Prefer a one‑click experience?** Run the **improved, full tuned upscaler** on the cloud with the best settings at **(https://egregoralabs.com)**.
 
