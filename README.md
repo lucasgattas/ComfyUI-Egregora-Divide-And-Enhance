@@ -2,7 +2,9 @@
 
 # **ComfyUI · Egregora: Divide & Enhance** 🧩🚀
 
-**⚡A set of ComfyUI nodes inspired by Divide & Conquer algorithm, designed to split, enhance, and recombine images for high-quality upscaling, with prompt mixing and analysis tools for cleaner, sharper results⚡**
+**⚡A set of ComfyUI nodes inspired by the Divide & Conquer algorithm, designed to split, enhance, and recombine images for high‑quality upscaling, with prompt mixing and analysis tools for cleaner, sharper results⚡**
+
+<img width="1615" height="789" alt="Suite Preview" src="https://github.com/user-attachments/assets/4cc5d352-75fa-4e80-808d-d6a246adbc4e" />
 
 </center>
 
@@ -20,7 +22,7 @@ Inspired by **Steudio’s Divide & Conquer** nodes, adapted and refactored to fi
 
 ### 🚀 Egregora Turbo Prompt
 
-Two prompts, two sliders—done, one for captioning (Florence2 or others), and one for Global positive and negative prompts. Builds **SDXL‑ready CONDITIONING** with:
+Two prompts, two sliders—done. One for **captioning** (e.g., Florence2) and one for **Global** positive/negative prompts. Builds **SDXL‑ready CONDITIONING** with:
 
 * auto‑read **size** from LATENT (ADM: width/height/target/crop),
 * proper **pooled\_output** handling (1280‑d),
@@ -82,9 +84,18 @@ git clone https://github.com/lucasgattas/comfyui-egregora-divide-and-enhance.git
 4. **VAE Decode** → **Preview / Save**
 
 **Upscaling (Divide & Enhance):**
+Use **Algorithm → Divide & Select → \[process tiles] → Combine**. Start with moderate tile sizes and overlap; preview first.
 
-* Use **Algorithm → Divide & Select → \[process tiles] → Combine**.
-  Start with moderate tile sizes and overlap; preview first.
+---
+
+## 📥 Example Workflow (.json)
+
+<img width="1130" height="742" alt="Captura de tela 2025-08-27 220324" src="https://github.com/user-attachments/assets/91735827-b882-45d7-bf17-d90fd23ed100" />
+
+* **Download:** `examples/divide_and_enhance_example_workflow.json` (included in this repo).
+* **Import:** ComfyUI → Queue (☰) → **Load** → pick the JSON.
+
+> **Prefer a one‑click experience?** Run the **improved, full tuned upscaler** on the cloud with the best settings at **(https://egregoralabs.com)**.
 
 ---
 
@@ -99,7 +110,7 @@ git clone https://github.com/lucasgattas/comfyui-egregora-divide-and-enhance.git
 ## 🧪 Troubleshooting
 
 * **Flat/grey outputs** → raise steps slightly or increase the stronger slider; ensure the CLIP/model are SDXL compatible.
-* **Repetitions/Grid looks** → check that you aren’t applying external tiling patches unintentionally; reduce extreme overlaps or tile size if using the Divide/Combine flow.
+* **Repetitions/Grid looks** → verify no external tiling patches are active; reduce extreme overlaps or tile size if using the Divide/Combine flow.
 * **Shape/key errors** → update to the latest version; Turbo Prompt sets `pooled_output` and ADM keys; make sure you pass a valid LATENT.
 
 ---
@@ -111,7 +122,9 @@ comfyui-egregora-divide-and-enhance/
 ├─ __init__.py
 ├─ egregora_divide_and_enhance.py
 ├─ README.md  ← you are here
-└─ Images/    ← optional screenshots
+├─ examples/
+│  └─ egregora_turbo_prompt_sdxl.json
+└─ Images/   ← optional screenshots (e.g., workflow_example.png)
 ```
 
 ---
@@ -125,7 +138,7 @@ comfyui-egregora-divide-and-enhance/
 
 ## 📜 License
 
-GNU GENERAL PUBLIC LICENSE Version 3, see [LICENSE](LICENSE)
+**GPL‑3.0** — see [LICENSE](LICENSE).
 
 ---
 
