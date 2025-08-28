@@ -983,12 +983,16 @@ Recommendations:
 
 
 # --- NODE: Egregora Turbo Prompt ---
+import re
+
 class Egregora_Turbo_Prompt:
-    """Two positive conditionings (caption & global) mixed by two sliders.
-       - No scheduling (stable for LCM + DMD2 at low steps/low CFG)
-       - Combine-style mixing: keep prompts separate; sampler merges them
-       - Strengths: contrasty 2-way softmax + raw magnitude preserved
-       - ADM keys auto-read from LATENT size
+    """
+    Minimal turbo prompt:
+      - POSITIVE = caption_text + global_positive_prompt (plain concat)
+      - NEGATIVE = global_negative_prompt
+      - blacklist_words (text): comma/newline-separated terms removed from POSITIVE
+      - No strengths, no extra toggles, no separators
+      - Outputs CONDITIONING with pooled_output
     """
 
     @classmethod
@@ -996,17 +1000,10 @@ class Egregora_Turbo_Prompt:
         return {
             "required": {
                 "clip": ("CLIP",),
-                # prompts first
                 "caption_text": ("STRING", {"multiline": True, "forceInput": True}),
                 "global_positive_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "global_negative_prompt": ("STRING", {"multiline": True, "default": ""}),
-                "blacklist_words": ("STRING", {"multiline": True, "default": ""}),
-                # strengths grouped together (global below caption)
-                "caption_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.01}),
-                "global_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 3.0, "step": 0.01}),
-            },
-            "optional": {
-                "latent": ("LATENT",),  # auto-read size if provided
+                "blacklist_words": ("STRING", {"multiline": True, "default": "", "placeholder": "blacklist_words"}),
             }
         }
 
@@ -1014,119 +1011,54 @@ class Egregora_Turbo_Prompt:
     RETURN_NAMES = ("positive_conditioning", "negative_conditioning")
     FUNCTION = "execute"
     CATEGORY = "Egregora/Conditioning"
-    DESCRIPTION = "Two conditionings with strengths; ADM from latent; combine-style mix; no scheduling."
+    DESCRIPTION = "Concatenate caption+global positive; use global negative; optional blacklist removal."
 
-    # ---------- helpers ----------
-    def _adm_from_latent(self, latent):
-        import torch
+    # -------- helpers --------
+    def _normalize(self, s: str) -> str:
+        s = (s or "").strip()
+        return re.sub(r"\s+", " ", s)
+
+    def _parse_blacklist(self, text: str):
+        if not text:
+            return []
+        items = [t.strip() for t in re.split(r"[,\n]+", text) if t.strip()]
+        seen, out = set(), []
+        for w in items:
+            lw = w.lower()
+            if lw not in seen:
+                seen.add(lw)
+                out.append(re.escape(w))
+        return out
+
+    def _apply_blacklist(self, text: str, terms):
+        if not text or not terms:
+            return self._normalize(text)
+        pattern = r"\b(?:{})\b".format("|".join(terms))
+        cleaned = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+        return self._normalize(cleaned)
+
+    def _encode(self, clip, text: str):
+        tokens = clip.tokenize(text)
+        # Prefer newer API that returns a dict; fall back if unavailable
         try:
-            t = latent.get("samples", None) if isinstance(latent, dict) else None
-            if isinstance(t, torch.Tensor) and t.dim() == 4:  # [B,C,H,W]
-                _, _, H, W = t.shape
-                img_w = int(W * 8)  # latent is 1/8 of image size
-                img_h = int(H * 8)
-                return {
-                    "width": img_w, "height": img_h,
-                    "target_width": img_w, "target_height": img_h,
-                    "crop_w": 0, "crop_h": 0,
-                }
-        except Exception:
-            pass
-        # fallback if no latent is wired
-        return {"width": 1024, "height": 1024, "target_width": 1024, "target_height": 1024, "crop_w": 0, "crop_h": 0}
+            out = clip.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
+            cond = out.pop("cond")
+            return [[cond, out]]
+        except TypeError:
+            cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
+            return [[cond, {"pooled_output": pooled}]]
 
-    def _clean(self, text, blacklist_words):
-        bl = {w.strip().lower() for w in (blacklist_words or "").split(",") if w.strip()}
-        toks = [(t or "").strip() for t in (text or "").split()]
-        out = " ".join([t for t in toks if t.lower() not in bl])
-        return out or " "
+    # -------- main --------
+    def execute(self, clip, caption_text, global_positive_prompt, global_negative_prompt, blacklist_words):
+        pos_text = self._normalize(f"{caption_text} {global_positive_prompt}".strip())
+        terms = self._parse_blacklist(blacklist_words)
+        pos_text = self._apply_blacklist(pos_text, terms)
 
-    def _ensure_2d_pooled(self, t):
-        import torch
-        if not isinstance(t, torch.Tensor):
-            return None
-        if t.dim() == 0: t = t.unsqueeze(0).unsqueeze(0)
-        elif t.dim() == 1: t = t.unsqueeze(0)
-        # SDXL expects 1280 for ADM pooled; if larger, slice
-        if t.shape[-1] > 1280:
-            t = t[:, :1280]
-        return t
+        neg_text = self._normalize(global_negative_prompt)
 
-    def _encode_with_strength(self, clip, text, strength):
-        import torch
-        tokens = clip.tokenize((text or " ").strip() or " ")
-        cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
-        if not torch.is_tensor(cond):   cond   = torch.tensor(cond)
-        if not torch.is_tensor(pooled): pooled = torch.tensor(pooled)
-        pooled = self._ensure_2d_pooled(pooled)
-        return cond, pooled, float(max(0.0, strength))
+        positive = self._encode(clip, pos_text if pos_text else " ")
+        negative = self._encode(clip, neg_text if neg_text else " ")
 
-    def _to_3d(self, x):
-        # force [B, N, D]
-        if x.dim() == 0: x = x.unsqueeze(0).unsqueeze(0).unsqueeze(0)
-        elif x.dim() == 1: x = x.unsqueeze(0).unsqueeze(1)
-        elif x.dim() == 2: x = x.unsqueeze(0)
-        return x
-
-    def _softmax2(self, a, b, temp=0.55):
-        # lower temperature -> more contrast between sliders
-        import math
-        ea = math.exp(a / max(1e-6, temp))
-        eb = math.exp(b / max(1e-6, temp))
-        s = ea + eb
-        if s <= 0: return 0.5, 0.5
-        return ea / s, eb / s
-
-    def _clamp_pair(self, pa, pb, lo=0.15, hi=0.85):
-        # clamp shares so neither side vanishes at low CFG
-        pa = max(lo, min(hi, pa))
-        pb = max(lo, min(hi, pb))
-        # renormalize to sum=1 after clamping
-        s = pa + pb
-        return pa / s, pb / s
-
-    # ---------- main ----------
-    def execute(self, clip, caption_text, global_positive_prompt, global_negative_prompt,
-                blacklist_words, caption_strength, global_strength, latent=None):
-
-        import torch
-
-        adm_defaults = self._adm_from_latent(latent)
-
-        # encode three texts
-        cap_cond, cap_pooled, cs = self._encode_with_strength(clip, self._clean(caption_text, blacklist_words), caption_strength)
-        pos_cond, pos_pooled, gs = self._encode_with_strength(clip, global_positive_prompt, global_strength)
-        neg_cond, neg_pooled, _  = self._encode_with_strength(clip, global_negative_prompt, 1.0)
-
-        # normalize shapes
-        cap_cond = self._to_3d(cap_cond)
-        pos_cond = self._to_3d(pos_cond)
-        neg_cond = self._to_3d(neg_cond)
-
-        # contrasty normalized shares + clamp (no scheduling)
-        p_cap, p_pos = self._softmax2(cs, gs, temp=0.55)
-        p_cap, p_pos = self._clamp_pair(p_cap, p_pos, lo=0.15, hi=0.85)
-
-        # We keep BOTH: normalized share ('strength') and raw magnitude ('weight')
-        def pack_info(pooled, share, raw):
-            info = dict(adm_defaults)
-            if isinstance(pooled, torch.Tensor):
-                info["pooled_output"] = pooled
-            info["strength"] = float(share)     # relative share (sum to 1 after clamp)
-            info["weight"]   = float(raw)       # raw magnitude, lets (1,1) differ from (0.5,0.5)
-            return info
-
-        positive = []
-        if cs > 0.0:
-            positive.append([cap_cond, pack_info(cap_pooled, p_cap, cs)])
-        if gs > 0.0:
-            positive.append([pos_cond, pack_info(pos_pooled, p_pos, gs)])
-        if not positive:
-            # fallback to empty prompt
-            empty_c, empty_p, _ = self._encode_with_strength(clip, " ", 1.0)
-            positive = [[self._to_3d(empty_c), pack_info(empty_p, 1.0, 1.0)]]
-
-        negative = [[neg_cond, pack_info(neg_pooled, 1.0, 1.0)]]
         return (positive, negative)
 
 
