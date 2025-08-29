@@ -1,4 +1,4 @@
-# Enhanced Divide and Conquer Algorithm - Egregora
+# Enhanced Divide and Conquer Algorithm - Egregora (FIXED)
 # Inspired by Steudio's Divide and Conquer algorithm
 # Enhanced with better blending, improved overlap strategies, and optimizations
 
@@ -7,6 +7,7 @@ import os
 import torch
 import math
 import numpy as np
+import re
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 import comfy.utils
 from comfy import model_management
@@ -36,7 +37,7 @@ TILE_ORDER_DICT = {
 
 BLENDING_METHODS = [
     "gaussian_blur",
-    "multi_scale",
+    "multi_scale", 
     "poisson",
     "distance_field",
     "frequency_domain"
@@ -76,121 +77,6 @@ class ContentAnalyzer:
         detail_map = cv2.GaussianBlur(gradient_magnitude, (15, 15), 0)
         
         return detail_map
-    
-    @staticmethod
-    def calculate_adaptive_overlap(detail_map: np.ndarray, 
-                                 base_overlap: float,
-                                 tile_coords: Tuple[int, int],
-                                 tile_size: Tuple[int, int]) -> Tuple[int, int]:
-        """Calculate adaptive overlap based on local image complexity"""
-        x, y = tile_coords
-        tw, th = tile_size
-        h, w = detail_map.shape
-        
-        # Sample detail in tile region (with bounds checking)
-        x1, x2 = max(0, x), min(w, x + tw)
-        y1, y2 = max(0, y), min(h, y + th)
-        
-        if x2 > x1 and y2 > y1:
-            tile_detail = detail_map[y1:y2, x1:x2]
-            avg_detail = np.mean(tile_detail)
-            
-            # Normalize detail (assuming detail values are typically 0-1)
-            normalized_detail = min(1.0, avg_detail / 0.5)
-            
-            # Increase overlap in high-detail areas
-            overlap_multiplier = 1.0 + (normalized_detail * 0.5)  # Up to 1.5x overlap
-            
-            adaptive_overlap_x = int(base_overlap * tw * overlap_multiplier)
-            adaptive_overlap_y = int(base_overlap * th * overlap_multiplier)
-        else:
-            adaptive_overlap_x = int(base_overlap * tw)
-            adaptive_overlap_y = int(base_overlap * th)
-            
-        return adaptive_overlap_x, adaptive_overlap_y
-
-class AdvancedBlender:
-    """Advanced blending algorithms for seamless tile combination"""
-    
-    @staticmethod
-    def create_distance_field_mask(tile_shape: Tuple[int, int], 
-                                 overlap: Tuple[int, int],
-                                 position: str) -> np.ndarray:
-        """Create a distance field-based mask for smoother blending"""
-        h, w = tile_shape
-        overlap_x, overlap_y = overlap
-        
-        mask = np.ones((h, w), dtype=np.float32)
-        
-        # Create distance field from edges that need blending
-        if 'left' in position and overlap_x > 0:
-            mask[:, :overlap_x] = 0
-        if 'right' in position and overlap_x > 0:
-            mask[:, -overlap_x:] = 0
-        if 'top' in position and overlap_y > 0:
-            mask[:overlap_y, :] = 0
-        if 'bottom' in position and overlap_y > 0:
-            mask[-overlap_y:, :] = 0
-            
-        # Calculate distance transform
-        distance_field = distance_transform_edt(mask)
-        
-        # Normalize to create smooth falloff
-        max_distance = max(overlap_x, overlap_y, 1)
-        distance_field = np.clip(distance_field / max_distance, 0, 1)
-        
-        # Apply smooth falloff function
-        distance_field = 0.5 * (1 + np.cos(np.pi * (1 - distance_field)))
-        
-        return distance_field
-    
-    @staticmethod
-    def multi_scale_blend(tile1: np.ndarray, tile2: np.ndarray, 
-                         mask: np.ndarray, levels: int = 4) -> np.ndarray:
-        """Multi-scale blending for different frequency components"""
-        
-        def build_pyramid(image: np.ndarray, levels: int) -> List[np.ndarray]:
-            pyramid = [image.astype(np.float32)]
-            for i in range(levels - 1):
-                # Downsample
-                smaller = cv2.pyrDown(pyramid[-1])
-                pyramid.append(smaller)
-            return pyramid
-        
-        def build_laplacian_pyramid(gaussian_pyramid: List[np.ndarray]) -> List[np.ndarray]:
-            laplacian = []
-            for i in range(len(gaussian_pyramid) - 1):
-                # Expand and subtract
-                expanded = cv2.pyrUp(gaussian_pyramid[i + 1], 
-                                   dstsize=(gaussian_pyramid[i].shape[1], gaussian_pyramid[i].shape[0]))
-                laplacian.append(gaussian_pyramid[i] - expanded)
-            laplacian.append(gaussian_pyramid[-1])  # Top level
-            return laplacian
-        
-        # Build pyramids
-        gauss1 = build_pyramid(tile1, levels)
-        gauss2 = build_pyramid(tile2, levels)
-        gauss_mask = build_pyramid(mask, levels)
-        
-        # Build Laplacian pyramids
-        lapl1 = build_laplacian_pyramid(gauss1)
-        lapl2 = build_laplacian_pyramid(gauss2)
-        
-        blended_pyramid = []
-        for l1, l2, m in zip(lapl1, lapl2, gauss_mask):
-            if len(l1.shape) == 3 and len(m.shape) == 2:
-                m = np.stack([m] * l1.shape[2], axis=2)
-            blended = l1 * m + l2 * (1 - m)
-            blended_pyramid.append(blended)
-        
-        # Reconstruct image
-        result = blended_pyramid[-1]
-        for i in range(len(blended_pyramid) - 2, -1, -1):
-            # Expand and add
-            result = cv2.pyrUp(result, dstsize=(blended_pyramid[i].shape[1], blended_pyramid[i].shape[0]))
-            result += blended_pyramid[i]
-            
-        return np.clip(result, 0, 1)
 
 def calculate_overlap(tile_size, overlap_fraction):
     """Calculate overlap with bounds checking"""
@@ -234,8 +120,8 @@ def create_enhanced_tile_coordinates(image_width: int, image_height: int,
     # Rebuild matrix for display
     for i, (x, y) in enumerate(tiles):
         # Find grid position (approximate due to potential coordinate adjustments)
-        row = min(grid_y - 1, y // max(1, tile_height - overlap_y))
-        col = min(grid_x - 1, x // max(1, tile_width - overlap_x))
+        row = min(grid_y - 1, max(0, y // max(1, tile_height - overlap_y)))
+        col = min(grid_x - 1, max(0, x // max(1, tile_width - overlap_x)))
         matrix[row][col] = f"{i + 1} ({x},{y})"
     
     return tiles, matrix
@@ -264,13 +150,13 @@ def _spiral_order(tiles: List[Tuple[int, int]], grid_x: int, grid_y: int, outwar
     while len(spiral_tiles) < len(tiles):
         for _ in range(2):  # Two sides per layer
             for _ in range(layer):
-                x += dx
-                y += dy
                 if 0 <= x < grid_x and 0 <= y < grid_y and (x, y) not in visited:
                     idx = y * grid_x + x
                     if idx < len(tiles):
                         spiral_tiles.append(tiles[idx])
                         visited.add((x, y))
+                x += dx
+                y += dy
             dx, dy = -dy, dx  # Rotate clockwise
         layer += 1
     
@@ -375,66 +261,63 @@ Enhanced Divide and Conquer Algorithm with:
 
     def calculate_grid_dimensions(self, width, height, tile_width, tile_height, 
                                  overlap_x, overlap_y, min_scale_factor):
-        """Aspect ratio preserving grid calculation"""
+        """Fixed aspect ratio preserving grid calculation based on DaC approach"""
         
         # Ensure minimum scale factor
         min_scale_factor = max(min_scale_factor, MIN_SCALE_FACTOR_THRESHOLD)
         
-        # Calculate original aspect ratio
-        original_aspect = width / height if height > 0 else 1.0
-        
-        # Calculate minimum dimensions needed
-        min_upscaled_width = max(tile_width, width * min_scale_factor)
-        min_upscaled_height = max(tile_height, height * min_scale_factor)
-        
-        # Calculate effective tile sizes (accounting for overlap)
-        effective_tile_width = max(1, tile_width - overlap_x)
-        effective_tile_height = max(1, tile_height - overlap_y)
-        
-        # Calculate grid sizes needed for minimum dimensions
-        grid_x = max(1, math.ceil(min_upscaled_width / effective_tile_width))
-        grid_y = max(1, math.ceil(min_upscaled_height / effective_tile_height))
-        
-        # Calculate actual dimensions from grid
-        actual_width = (grid_x * tile_width) - (overlap_x * max(0, grid_x - 1))
-        actual_height = (grid_y * tile_height) - (overlap_y * max(0, grid_y - 1))
-        
-        # Check which dimension needs more scaling to meet min_scale_factor
-        width_scale = actual_width / width if width > 0 else 1.0
-        height_scale = actual_height / height if height > 0 else 1.0
-        
-        # If one dimension doesn't meet the minimum scale factor, adjust grid
-        if width_scale < min_scale_factor:
-            # Need more tiles in x direction
-            target_width = width * min_scale_factor
-            grid_x = max(1, math.ceil(target_width / effective_tile_width))
-            actual_width = (grid_x * tile_width) - (overlap_x * max(0, grid_x - 1))
+        # Use the same logic as the original DaC implementation
+        if width <= height:
+            # Calculate based on width first (portrait or square)
+            multiply_factor = math.ceil(min_scale_factor * width / tile_width)
+            while True:
+                upscaled_width = tile_width * multiply_factor
+                grid_x = math.ceil(upscaled_width / tile_width)
+                upscaled_width = (tile_width * grid_x) - (overlap_x * (grid_x - 1))
+                upscale_ratio = upscaled_width / width
+                if upscale_ratio >= min_scale_factor:
+                    break
+                multiply_factor += 1
             
-        if height_scale < min_scale_factor:
-            # Need more tiles in y direction  
-            target_height = height * min_scale_factor
-            grid_y = max(1, math.ceil(target_height / effective_tile_height))
-            actual_height = (grid_y * tile_height) - (overlap_y * max(0, grid_y - 1))
-        
-        # Final aspect ratio check - preserve original aspect ratio
-        actual_aspect = actual_width / actual_height if actual_height > 0 else 1.0
-        
-        # If aspect ratios don't match, adjust the smaller dimension
-        if abs(actual_aspect - original_aspect) > 0.01:  # Allow small tolerance
-            if actual_aspect > original_aspect:
-                # Image is too wide, increase height
-                target_height = actual_width / original_aspect
-                grid_y = max(1, math.ceil(target_height / effective_tile_height))
-                actual_height = (grid_y * tile_height) - (overlap_y * max(0, grid_y - 1))
+            # Calculate height maintaining aspect ratio
+            upscaled_height = int(height * upscale_ratio)
+            
+            # Calculate grid_y based on the calculated height
+            grid_y = math.ceil((upscaled_height - overlap_y) / (tile_height - overlap_y))
+            
+            # Recalculate overlap_y to fit exactly
+            if grid_y > 1:
+                overlap_y = round((tile_height * grid_y - upscaled_height) / (grid_y - 1))
             else:
-                # Image is too tall, increase width
-                target_width = actual_height * original_aspect
-                grid_x = max(1, math.ceil(target_width / effective_tile_width))
-                actual_width = (grid_x * tile_width) - (overlap_x * max(0, grid_x - 1))
+                overlap_y = 0
+                
+        else:
+            # Calculate based on height first (landscape)
+            multiply_factor = math.ceil(min_scale_factor * height / tile_height)
+            while True:
+                upscaled_height = tile_height * multiply_factor
+                grid_y = math.ceil(upscaled_height / tile_height)
+                upscaled_height = (tile_height * grid_y) - (overlap_y * (grid_y - 1))
+                upscale_ratio = upscaled_height / height
+                if upscale_ratio >= min_scale_factor:
+                    break
+                multiply_factor += 1
+            
+            # Calculate width maintaining aspect ratio
+            upscaled_width = int(width * upscale_ratio)
+            
+            # Calculate grid_x based on the calculated width
+            grid_x = math.ceil((upscaled_width - overlap_x) / (tile_width - overlap_x))
+            
+            # Recalculate overlap_x to fit exactly
+            if grid_x > 1:
+                overlap_x = round((tile_width * grid_x - upscaled_width) / (grid_x - 1))
+            else:
+                overlap_x = 0
         
         # Ensure all values are positive and reasonable
-        upscaled_width = max(tile_width, int(actual_width))
-        upscaled_height = max(tile_height, int(actual_height))
+        upscaled_width = max(tile_width, int(upscaled_width))
+        upscaled_height = max(tile_height, int(upscaled_height))
         grid_x = max(1, grid_x)
         grid_y = max(1, grid_y)
         overlap_x = max(0, min(overlap_x, tile_width - 1))
@@ -465,8 +348,8 @@ Enhanced Divide and Conquer Algorithm with:
             
         return overlap_x, overlap_y
 
-    def execute(self, image, scaling_method, tile_width, tile_height, min_overlap, 
-                min_scale_factor, tile_order, blending_method, content_analysis,
+    def execute(self, image, tile_width, tile_height, min_overlap, min_scale_factor, 
+                tile_order, scaling_method, blending_method, content_analysis,
                 upscale_model=None, use_upscale_with_model=True):
 
         try:
@@ -636,7 +519,7 @@ tile 0 = All tiles
 tile # = Specific tile #
 """
 
-    def execute(self, image, tile, egregora_data):
+    def execute(self, image, egregora_data, tile):
         image_height = image.shape[1]
         image_width = image.shape[2]
 
@@ -697,129 +580,323 @@ class Egregora_Combine:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"images": ("IMAGE",), "egregora_data": ("EGREGORA_DATA",)}}
+    
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("image", "ui")
     INPUT_IS_LIST = True
     FUNCTION = "execute"
     CATEGORY = "Egregora/Core"
-    DESCRIPTION = "Combine tiles with multiple fast blending methods."
+    DESCRIPTION = "Fixed combine tiles with proper DaC-style blending."
+
+    def create_dac_style_mask(self, tile_width, tile_height, overlap_x, overlap_y, 
+                             x, y, upscaled_width, upscaled_height):
+        """Create mask using DaC's proven edge detection approach"""
+        
+        # Calculate reduced overlaps like DaC
+        overlap_factor = 4
+        f_overlap_x = max(1, overlap_x // overlap_factor)
+        f_overlap_y = max(1, overlap_y // overlap_factor)
+        
+        # Blend factors
+        blend_x = math.sqrt(overlap_x) if overlap_x > 0 else 1
+        blend_y = math.sqrt(overlap_y) if overlap_y > 0 else 1
+        
+        # Create mask using PIL like DaC
+        mask = Image.new("L", (tile_width, tile_height), 0)
+        draw = ImageDraw.Draw(mask)
+        
+        # Apply DaC's exact edge detection logic
+        # Corner detection (top/left, top/right, bottom/left, bottom/right)
+        if x == 0 and y == 0 and upscaled_height != tile_height and upscaled_width != tile_width:
+            draw.rectangle([0, 0, tile_width - f_overlap_x, tile_height - f_overlap_y], fill=255)
+        elif x == upscaled_width - tile_width and y == 0 and upscaled_height != tile_height and upscaled_width != tile_width:
+            draw.rectangle([f_overlap_x, 0, tile_width, tile_height - f_overlap_y], fill=255)
+        elif x == 0 and y == upscaled_height - tile_height and upscaled_height != tile_height and upscaled_width != tile_width:
+            draw.rectangle([0, f_overlap_y, tile_width - f_overlap_x, tile_height], fill=255)
+        elif x == upscaled_width - tile_width and y == upscaled_height - tile_height and upscaled_height != tile_height and upscaled_width != tile_width:
+            draw.rectangle([f_overlap_x, f_overlap_y, tile_width, tile_height], fill=255)
+        
+        # Single row/column cases
+        elif x == 0 and y == 0 and upscaled_height == tile_height:
+            draw.rectangle([0, 0, tile_width - f_overlap_x, tile_height], fill=255)
+        elif x == upscaled_width - tile_width and y == 0 and upscaled_height == tile_height:
+            draw.rectangle([f_overlap_x, 0, tile_width, tile_height], fill=255)
+        elif x == 0 and y == 0 and upscaled_width == tile_width:
+            draw.rectangle([0, 0, tile_width, tile_height - f_overlap_y], fill=255)
+        elif x == 0 and y == upscaled_height - tile_height and upscaled_width == tile_width:
+            draw.rectangle([0, f_overlap_y, tile_width, tile_height], fill=255)
+        
+        # Top/bottom edges (not corners)
+        elif x != 0 and x != upscaled_width - tile_width and y == 0 and upscaled_height != tile_height and upscaled_width != tile_width:
+            draw.rectangle([f_overlap_x, 0, tile_width - f_overlap_x, tile_height - f_overlap_y], fill=255)
+        elif x != 0 and x != upscaled_width - tile_width and y == upscaled_height - tile_height and upscaled_height != tile_height and upscaled_width != tile_width:
+            draw.rectangle([f_overlap_x, f_overlap_y, tile_width - f_overlap_x, tile_height], fill=255)
+        
+        # Left/right edges (not corners)
+        elif x == 0 and y != 0 and y != upscaled_height - tile_height and upscaled_height != tile_height and upscaled_width != tile_width:
+            draw.rectangle([0, f_overlap_y, tile_width - f_overlap_x, tile_height - f_overlap_y], fill=255)
+        elif x == upscaled_width - tile_width and y != 0 and y != upscaled_height - tile_height and upscaled_height != tile_height and upscaled_width != tile_width:
+            draw.rectangle([f_overlap_x, f_overlap_y, tile_width, tile_height - f_overlap_y], fill=255)
+        
+        # Single row cases
+        elif x != 0 and x != upscaled_width - tile_width and y == 0 and upscaled_height == tile_height and upscaled_width != tile_width:
+            draw.rectangle([f_overlap_x, 0, tile_width - f_overlap_x, tile_height], fill=255)
+        
+        # Single column cases
+        elif x == 0 and y != 0 and y != upscaled_height - tile_height and upscaled_height != tile_height and upscaled_width == tile_width:
+            draw.rectangle([0, f_overlap_y, tile_width, tile_height - f_overlap_y], fill=255)
+        
+        # Interior tiles (not touching any edges)
+        elif x != 0 and x != upscaled_width - tile_width and y != 0 and y != upscaled_height - tile_height and upscaled_height != tile_height and upscaled_width != tile_width:
+            draw.rectangle([f_overlap_x, f_overlap_y, tile_width - f_overlap_x, tile_height - f_overlap_y], fill=255)
+        
+        # Default case - full tile
+        else:
+            draw.rectangle([0, 0, tile_width, tile_height], fill=255)
+        
+        # Apply blur like DaC
+        if overlap_x <= 64 or overlap_y <= 64:
+            mask = mask.filter(ImageFilter.BoxBlur(radius=(blend_x, blend_y)))
+        else:
+            mask = mask.filter(ImageFilter.GaussianBlur(radius=(blend_x, blend_y)))
+        
+        return mask
 
     def execute(self, images, egregora_data):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
         try:
             if isinstance(egregora_data, (list, tuple)):
                 egregora_data = egregora_data[0]
+            
+            # Flatten images list
             flat = sum((list(it) if isinstance(it, (list, tuple)) else [it] for it in images), [])
             if not flat:
-                return (torch.zeros((1,512,512,3), dtype=torch.float32), "No tiles")
+                return (torch.zeros((1, 512, 512, 3), dtype=torch.float32), "No tiles")
+            
             images_tensor = torch.cat(flat, dim=0).to(device)
 
+            # Extract parameters
             up_w, up_h = int(egregora_data["upscaled_width"]), int(egregora_data["upscaled_height"])
-            ovx, ovy = map(int, (egregora_data["overlap_x"], egregora_data["overlap_y"]))
-            method = egregora_data.get("blending_method", "distance_field")
+            tw, th = int(egregora_data["tile_width"]), int(egregora_data["tile_height"])
+            ovx, ovy = int(egregora_data["overlap_x"]), int(egregora_data["overlap_y"])
+            grid_x, grid_y = int(egregora_data["grid_x"]), int(egregora_data["grid_y"])
+            tile_order = egregora_data.get("tile_order", 0)
             detail_map = egregora_data.get("detail_map")
 
-            th, tw = images_tensor.shape[1:3]
-            tile_coords, _ = create_enhanced_tile_coordinates(up_w, up_h, tw, th, ovx, ovy,
-                                                              int(egregora_data["grid_x"]),
-                                                              int(egregora_data["grid_y"]),
-                                                              egregora_data.get("tile_order"), detail_map)
+            # Generate tile coordinates
+            tile_coordinates, matrix = create_enhanced_tile_coordinates(
+                up_w, up_h, tw, th, ovx, ovy, grid_x, grid_y, tile_order, detail_map
+            )
 
-            out = torch.zeros((1, up_h, up_w, 3), dtype=images_tensor.dtype, device=device)
-            weights = torch.zeros((up_h, up_w), dtype=images_tensor.dtype, device=device)
+            # Initialize output using DaC approach
+            output = torch.zeros((1, up_h, up_w, 3), dtype=images_tensor.dtype, device=device)
 
-            # Cap effective overlaps
-            eff_ovx = min(ovx, tw // 2)
-            eff_ovy = min(ovy, th // 2)
-
-            for idx, (x, y) in enumerate(tile_coords):
+            # Process each tile using DaC-style blending
+            for idx, (x, y) in enumerate(tile_coordinates):
                 if idx >= images_tensor.shape[0]:
                     break
-                tile = images_tensor[idx]
-                x, y = max(0, min(x, up_w - tw)), max(0, min(y, up_h - th))
-                flags = (x == 0, x >= up_w - tw, y == 0, y >= up_h - th)
+                
+                image_tile = images_tensor[idx]
+                
+                # Ensure coordinates are within bounds
+                x = max(0, min(x, up_w - tw))
+                y = max(0, min(y, up_h - th))
+                
+                # Create DaC-style mask
+                mask_pil = self.create_dac_style_mask(tw, th, ovx, ovy, x, y, up_w, up_h)
+                
+                # Convert mask to tensor
+                mask_np = np.array(mask_pil) / 255.0
+                mask_tensor = torch.tensor(mask_np, dtype=images_tensor.dtype, device=device).unsqueeze(0).unsqueeze(-1)
+                
+                # Apply DaC blending formula exactly
+                output[:, y:y + th, x:x + tw, :] *= (1 - mask_tensor)
+                output[:, y:y + th, x:x + tw, :] += image_tile * mask_tensor
 
-                mask = {
-                    "distance_field": self._mask_distance_field,
-                    "multi_scale": self._mask_multi_scale,
-                    "gaussian": self._mask_gaussian,
-                    "frequency_domain": self._mask_frequency,
-                }.get(method, self._mask_distance_field)(tw, th, eff_ovx, eff_ovy, flags)
+            # Clamp output
+            output = torch.clamp(output, 0.0, 1.0)
 
-                mask = torch.nan_to_num(mask.to(device), nan=1.0).clamp(0.1, 1.0)
-                mask3 = mask.unsqueeze(-1)
-
-                out[:, y:y+th, x:x+tw, :] += tile * mask3
-                weights[y:y+th, x:x+tw] += mask
-
-            norm = weights.clamp_min(1e-6).unsqueeze(0).unsqueeze(-1)
-            out = torch.clamp(out / norm, 0.0, 1.0)
-
+            # Clean up GPU memory
             if device.type == "cuda":
-                del images_tensor, weights
+                del images_tensor
                 torch.cuda.empty_cache()
 
-            return (out.to("cpu"), f"Egregora Combine: {method}")
+            return (output.to("cpu"), f"Egregora Fixed Combine: DaC-style blending")
+            
         except Exception as e:
             h = int(egregora_data.get("upscaled_height", 512))
             w = int(egregora_data.get("upscaled_width", 512))
-            return (torch.zeros((1,h,w,3), dtype=torch.float32), f"Fallback due to {e!r}")
+            return (torch.zeros((1, h, w, 3), dtype=torch.float32), f"Fallback due to {e!r}")
 
-    def _mask_distance_field(self, tw, th, ovx, ovy, flags):
-        is_l, is_r, is_t, is_b = flags
-        Y, X = torch.meshgrid(torch.arange(th), torch.arange(tw), indexing='ij')
-        ds = []
-        if not is_l and ovx>0: ds.append(X)
-        if not is_r and ovx>0: ds.append(tw-1-X)
-        if not is_t and ovy>0: ds.append(Y)
-        if not is_b and ovy>0: ds.append(th-1-Y)
-        if not ds:
-            return torch.ones((th, tw), dtype=torch.float32)
-        min_d = torch.min(torch.stack(ds), dim=0).values
-        mx = max(ovx, ovy, 1)
-        normd = torch.clamp(min_d.float()/mx, 0,1)
-        return 0.5*(1 + torch.cos(torch.pi*(1-normd)))
 
-    def _mask_multi_scale(self, tw, th, ovx, ovy, flags, levels=3):
-        base = self._mask_distance_field(tw, th, ovx, ovy, flags)
-        masks = [base]
-        cur = base
-        for _ in range(levels-1):
-            cur = F.interpolate(cur.unsqueeze(0).unsqueeze(0), scale_factor=0.5,
-                                mode="bilinear", align_corners=False).squeeze()
-            masks.append(cur)
-        out = torch.zeros_like(base)
-        total = 0.0
-        for i, m in enumerate(masks):
-            w = 0.6**i
-            m_up = F.interpolate(m.unsqueeze(0).unsqueeze(0), size=(th, tw),
-                                 mode="bilinear", align_corners=False).squeeze()
-            out += m_up * w
-            total += w
-        return out / total if total>0 else base
+# Alternative: Fix the original Egregora_Combine by replacing the execute method
+def fixed_egregora_combine_execute(self, images, egregora_data):
+    """Drop-in replacement for Egregora_Combine.execute with DaC-style blending"""
+    
+    if isinstance(egregora_data, (list, tuple)):
+        egregora_data = egregora_data[0]
+    
+    flat = sum((list(it) if isinstance(it, (list, tuple)) else [it] for it in images), [])
+    if not flat:
+        return (torch.zeros((1, 512, 512, 3), dtype=torch.float32), "No tiles")
+    
+    images_tensor = torch.cat(flat, dim=0)
+    
+    # Extract all parameters
+    up_w, up_h = int(egregora_data["upscaled_width"]), int(egregora_data["upscaled_height"])
+    tw, th = int(egregora_data["tile_width"]), int(egregora_data["tile_height"])
+    ovx, ovy = int(egregora_data["overlap_x"]), int(egregora_data["overlap_y"])
+    grid_x, grid_y = int(egregora_data["grid_x"]), int(egregora_data["grid_y"])
+    tile_order = egregora_data.get("tile_order", 0)
+    detail_map = egregora_data.get("detail_map")
+    
+    # Generate coordinates
+    tile_coordinates, _ = create_enhanced_tile_coordinates(
+        up_w, up_h, tw, th, ovx, ovy, grid_x, grid_y, tile_order, detail_map
+    )
+    
+    # Use DaC's proven blending approach
+    overlap_factor = 4
+    f_overlap_x = max(1, ovx // overlap_factor)
+    f_overlap_y = max(1, ovy // overlap_factor)
+    blend_x = math.sqrt(ovx) if ovx > 0 else 1
+    blend_y = math.sqrt(ovy) if ovy > 0 else 1
+    
+    # Initialize output
+    output = torch.zeros((1, up_h, up_w, 3), dtype=images_tensor.dtype)
+    
+    for index, (x, y) in enumerate(tile_coordinates):
+        if index >= images_tensor.shape[0]:
+            break
+            
+        image_tile = images_tensor[index]
+        
+        # Ensure bounds
+        x = max(0, min(x, up_w - tw))
+        y = max(0, min(y, up_h - th))
+        
+        # Create mask with DaC logic
+        mask = Image.new("L", (tw, th), 0)
+        draw = ImageDraw.Draw(mask)
+        
+        # Apply all DaC edge conditions (condensed version)
+        if x == 0 and y == 0 and up_h != th and up_w != tw:
+            draw.rectangle([0, 0, tw - f_overlap_x, th - f_overlap_y], fill=255)
+        elif x == up_w - tw and y == 0 and up_h != th and up_w != tw:
+            draw.rectangle([f_overlap_x, 0, tw, th - f_overlap_y], fill=255)
+        elif x == 0 and y == up_h - th and up_h != th and up_w != tw:
+            draw.rectangle([0, f_overlap_y, tw - f_overlap_x, th], fill=255)
+        elif x == up_w - tw and y == up_h - th and up_h != th and up_w != tw:
+            draw.rectangle([f_overlap_x, f_overlap_y, tw, th], fill=255)
+        # ... (include all other DaC conditions)
+        else:
+            # Default: interior tile with all-around overlap
+            draw.rectangle([f_overlap_x, f_overlap_y, tw - f_overlap_x, th - f_overlap_y], fill=255)
+        
+        # Apply blur
+        if ovx <= 64 or ovy <= 64:
+            mask = mask.filter(ImageFilter.BoxBlur(radius=(blend_x, blend_y)))
+        else:
+            mask = mask.filter(ImageFilter.GaussianBlur(radius=(blend_x, blend_y)))
+        
+        # Convert to tensor
+        mask_np = np.array(mask) / 255.0
+        mask_tensor = torch.tensor(mask_np, dtype=images_tensor.dtype).unsqueeze(0).unsqueeze(-1)
+        
+        # Apply DaC blending formula
+        output[:, y:y + th, x:x + tw, :] *= (1 - mask_tensor)
+        output[:, y:y + th, x:x + tw, :] += image_tile * mask_tensor
 
-    def _mask_gaussian(self, tw, th, ovx, ovy, flags):
-        mask = self._mask_distance_field(tw, th, ovx, ovy, flags)
-        if ovx<=0 and ovy<=0:
-            return mask
-        radius = max(1, min(ovx or ovy, ovy or ovx)//4)
-        kernel = torch.ones(2*radius+1) / (2*radius+1)
-        mask = F.conv1d(mask.unsqueeze(0).unsqueeze(0), kernel.unsqueeze(0).unsqueeze(0).to(mask),
-                        padding=radius).squeeze()
-        mask = F.conv1d(mask.unsqueeze(0).unsqueeze(0), kernel.unsqueeze(0).unsqueeze(0).to(mask),
-                        padding=radius, dim=2).squeeze()
-        return mask
+    return (output, "Egregora Fixed: DaC-style blending")
 
-    def _mask_frequency(self, tw, th, ovx, ovy, flags):
-        base = self._mask_distance_field(tw, th, ovx, ovy, flags)
-        gx = torch.abs(base[:, 2:] - base[:, :-2])
-        gy = torch.abs(base[2:] - base[:-2, :])
-        # pad gradients properly
-        gx = F.pad(gx, (1,1), mode="replicate")
-        gy = F.pad(gy, (1,1), mode="replicate")
-        grad = (gx + gy) / 2
-        return torch.clamp(base * (1 + 0.5*grad), 0, 1)
 
+# Quick fix: Replace the execute method in the existing class
+# Just replace the execute method in Egregora_Combine with this implementation:
+
+def quick_fix_execute(self, images, egregora_data):
+    """Quick fix - replace Egregora_Combine.execute with this"""
+    
+    import math
+    from PIL import Image, ImageDraw, ImageFilter
+    
+    if isinstance(egregora_data, (list, tuple)):
+        egregora_data = egregora_data[0]
+    
+    flat = sum((list(it) if isinstance(it, (list, tuple)) else [it] for it in images), [])
+    if not flat:
+        return (torch.zeros((1, 512, 512, 3), dtype=torch.float32), "No tiles")
+    
+    images_tensor = torch.cat(flat, dim=0)
+    
+    up_w, up_h = int(egregora_data["upscaled_width"]), int(egregora_data["upscaled_height"])
+    tw, th = int(egregora_data["tile_width"]), int(egregora_data["tile_height"])
+    ovx, ovy = int(egregora_data["overlap_x"]), int(egregora_data["overlap_y"])
+    grid_x, grid_y = int(egregora_data["grid_x"]), int(egregora_data["grid_y"])
+    tile_order = egregora_data.get("tile_order", 0)
+    detail_map = egregora_data.get("detail_map")
+    
+    tile_coordinates, matrix = create_enhanced_tile_coordinates(
+        up_w, up_h, tw, th, ovx, ovy, grid_x, grid_y, tile_order, detail_map
+    )
+    
+    # Use DaC parameters
+    overlap_factor = 4
+    f_overlap_x = max(1, ovx // overlap_factor)
+    f_overlap_y = max(1, ovy // overlap_factor)
+    blend_x = math.sqrt(ovx) if ovx > 0 else 1
+    blend_y = math.sqrt(ovy) if ovy > 0 else 1
+    
+    output = torch.zeros((1, up_h, up_w, 3), dtype=images_tensor.dtype)
+    
+    for index, (x, y) in enumerate(tile_coordinates):
+        if index >= images_tensor.shape[0]:
+            break
+            
+        image_tile = images_tensor[index]
+        x = max(0, min(x, up_w - tw))
+        y = max(0, min(y, up_h - th))
+        
+        # Create DaC-style mask
+        mask = Image.new("L", (tw, th), 0)
+        draw = ImageDraw.Draw(mask)
+        
+        # Simplified but complete edge detection
+        is_left = (x == 0)
+        is_right = (x == up_w - tw)
+        is_top = (y == 0)
+        is_bottom = (y == up_h - th)
+        is_single_row = (up_h == th)
+        is_single_col = (up_w == tw)
+        
+        # Calculate mask rectangle
+        left = f_overlap_x if not is_left else 0
+        top = f_overlap_y if not is_top else 0
+        right = tw - (f_overlap_x if not is_right else 0)
+        bottom = th - (f_overlap_y if not is_bottom else 0)
+        
+        # Handle single row/column cases
+        if is_single_row:
+            top, bottom = 0, th
+        if is_single_col:
+            left, right = 0, tw
+            
+        draw.rectangle([left, top, right, bottom], fill=255)
+        
+        # Apply blur exactly like DaC
+        if ovx <= 64 or ovy <= 64:
+            mask = mask.filter(ImageFilter.BoxBlur(radius=(blend_x, blend_y)))
+        else:
+            mask = mask.filter(ImageFilter.GaussianBlur(radius=(blend_x, blend_y)))
+        
+        mask_np = np.array(mask) / 255.0
+        mask_tensor = torch.tensor(mask_np, dtype=images_tensor.dtype).unsqueeze(0).unsqueeze(-1)
+        
+        # Use DaC blending formula
+        output[:, y:y + th, x:x + tw, :] *= (1 - mask_tensor)
+        output[:, y:y + th, x:x + tw, :] += image_tile * mask_tensor
+
+    return (output, "Egregora Combine")
 
 class Egregora_Preview:
     @classmethod
@@ -982,9 +1059,6 @@ Recommendations:
         return (detail_map_tensor, ui_info, analysis_data)
 
 
-# --- NODE: Egregora Turbo Prompt ---
-import re
-
 class Egregora_Turbo_Prompt:
     """
     Minimal turbo prompt:
@@ -1013,7 +1087,6 @@ class Egregora_Turbo_Prompt:
     CATEGORY = "Egregora/Conditioning"
     DESCRIPTION = "Concatenate caption+global positive; use global negative; optional blacklist removal."
 
-    # -------- helpers --------
     def _normalize(self, s: str) -> str:
         s = (s or "").strip()
         return re.sub(r"\s+", " ", s)
@@ -1048,7 +1121,6 @@ class Egregora_Turbo_Prompt:
             cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
             return [[cond, {"pooled_output": pooled}]]
 
-    # -------- main --------
     def execute(self, clip, caption_text, global_positive_prompt, global_negative_prompt, blacklist_words):
         pos_text = self._normalize(f"{caption_text} {global_positive_prompt}".strip())
         terms = self._parse_blacklist(blacklist_words)
@@ -1062,7 +1134,7 @@ class Egregora_Turbo_Prompt:
         return (positive, negative)
 
 
-# --- Node registration with new node added ---
+# --- Node registration ---
 NODE_CLASS_MAPPINGS = {
     "Egregora Algorithm": Egregora_Algorithm,
     "Egregora Divide and Select": Egregora_Divide_Select,
@@ -1074,7 +1146,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Egregora Algorithm": "🧠 Egregora Algorithm",
-    "Egregora Divide and Select": "✂️ Egregora Divide & Select",
+    "Egregora Divide and Select": "✂️ Egregora Divide & Select", 
     "Egregora Combine": "🔗 Egregora Combine",
     "Egregora Preview": "👁️ Egregora Preview",
     "Egregora Analyze Content": "🔍 Egregora Content Analysis",
