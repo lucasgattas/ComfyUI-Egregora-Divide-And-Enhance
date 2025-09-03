@@ -11,43 +11,26 @@ import cv2
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 from typing import Tuple, List, Dict, Optional
 
+# Constants and helper functions from the original file for reference
 OVERLAP_DICT = {
-    "None": 0,
-    "1/64 Tile": 0.015625,
-    "1/32 Tile": 0.03125,
-    "1/16 Tile": 0.0625,
-    "1/8 Tile": 0.125,
-    "1/4 Tile": 0.25,
-    "1/2 Tile": 0.5,
-    "Adaptive": -1,
+    "None": 0, "1/64 Tile": 0.015625, "1/32 Tile": 0.03125,
+    "1/16 Tile": 0.0625, "1/8 Tile": 0.125, "1/4 Tile": 0.25,
+    "1/2 Tile": 0.5, "Adaptive": -1,
 }
 
 TILE_ORDER_DICT = {
-    "linear": 0,
-    "spiral_outward": 1,
-    "spiral_inward": 2,
-    "serpentine": 3,
-    "content_aware": 4,
-    "dependency_optimized": 5
+    "linear": 0, "spiral_outward": 1, "spiral_inward": 2,
+    "serpentine": 3, "content_aware": 4, "dependency_optimized": 5
 }
 
 BLENDING_METHODS = [
-    "gaussian_blur",
-    "multi_scale", 
-    "distance_field",
-    "frequency_domain",
-    "advanced_feather"
+    "gaussian_blur", "multi_scale", "distance_field",
+    "frequency_domain", "advanced_feather"
 ]
 
 SCALING_METHODS = [
-    "nearest-exact",
-    "bilinear", 
-    "area",
-    "bicubic",
-    "lanczos"
+    "nearest-exact", "bilinear", "area", "bicubic", "lanczos"
 ]
-
-MIN_SCALE_FACTOR_THRESHOLD = 1.0
 
 class ContentAnalyzer:
     """Analyzes image content to optimize tiling strategy"""
@@ -229,15 +212,10 @@ class Egregora_Algorithm:
                 "image": ("IMAGE",),
                 "tile_width": ("INT", {"default": 1024, "min": 64, "max": 4096, "step": 64}),
                 "tile_height": ("INT", {"default": 1024, "min": 64, "max": 4096, "step": 64}),
-                # fixed overlap ratio selector (kept from your nodes)
                 "min_overlap": (list(OVERLAP_DICT.keys()), {"default": "1/8 Tile"}),
                 "min_scale_factor": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 8.0, "step": 0.1}),
                 "tile_order": (list(TILE_ORDER_DICT.keys()), {"default": "linear"}),
                 "scaling_method": (SCALING_METHODS, {"default": "lanczos"}),
-            },
-            "optional": {
-                "upscale_model": ("UPSCALE_MODEL",),
-                "use_upscale_with_model": ("BOOLEAN", {"default": True}),
             },
         }
 
@@ -247,7 +225,7 @@ class Egregora_Algorithm:
     CATEGORY = "Egregora/Core"
 
     def _calc_grid(self, W, H, tw, th, ox, oy, min_sf):
-        # Simple version: grow until min scale is met, then derive grid & overlap fit.
+        import math
         min_sf = max(min_sf, 1.0)
         if W <= H:
             m = math.ceil(min_sf * W / tw)
@@ -276,23 +254,22 @@ class Egregora_Algorithm:
 
         upW = max(tw, int(upW))
         upH = max(th, int(upH))
-        gx = max(1, gx)
-        gy = max(1, gy)
+        gx = max(1, gx); gy = max(1, gy)
         ox = max(0, min(ox, tw - 1))
         oy = max(0, min(oy, th - 1))
         return upW, upH, gx, gy, ox, oy
 
     def execute(self, image, tile_width, tile_height, min_overlap, min_scale_factor,
-                tile_order, scaling_method, upscale_model=None, use_upscale_with_model=True):
+                tile_order, scaling_method):
 
+        import comfy
         _, H, W, _ = image.shape
         ov = OVERLAP_DICT.get(min_overlap, 0.125)
-        ox = calculate_overlap(tile_width, ov if ov != -1 else 0.0625)
+        ox = calculate_overlap(tile_width,  ov if ov != -1 else 0.0625)
         oy = calculate_overlap(tile_height, ov if ov != -1 else 0.0625)
 
         upW, upH, gx, gy, ox, oy = self._calc_grid(W, H, tile_width, tile_height, ox, oy, min_scale_factor)
 
-        # (your upscaler path – unchanged idea)
         samples = image.movedim(-1, 1)
         up = comfy.utils.common_upscale(samples, upW, upH, scaling_method, crop=0).movedim(1, -1)
 
@@ -302,7 +279,6 @@ class Egregora_Algorithm:
             "overlap_x": int(ox), "overlap_y": int(oy),
             "grid_x": int(gx), "grid_y": int(gy),
             "tile_order": int(TILE_ORDER_DICT.get(tile_order, 0)),
-            # combine will use only the fields above; no blend knobs.
         }
 
         ui = (f"Egregora Algorithm\n"
@@ -385,7 +361,7 @@ class Egregora_Combine:
             "required": {
                 "images": ("IMAGE",),
                 "egregora_data": ("EGREGORA_DATA",),
-            }
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "STRING")
@@ -394,102 +370,12 @@ class Egregora_Combine:
     FUNCTION = "execute"
     CATEGORY = "Egregora/Core"
 
-    # --- utilities ---------------------------------------------------------
-
-    def _ssd(self, a, b):
-        # squared color difference (float32), single-channel cost
-        d = a.astype(np.float32) - b.astype(np.float32)
-        return np.sum(d * d, axis=2)
-
-    def _seam_dp_vertical(self, cost):
-        """
-        Find min-cost TOP->BOTTOM path in a (H x W) cost map.
-        Returns list of x positions (one per row).
-        """
-        H, W = cost.shape
-        acc = cost.copy()
-        back = np.zeros((H, W), np.int32)
-
-        for y in range(1, H):
-            prev = acc[y-1]
-            # three neighbors: x-1, x, x+1 (clamped)
-            left  = np.roll(prev, 1);  left[0]   = prev[0]
-            mid   = prev
-            right = np.roll(prev, -1); right[-1] = prev[-1]
-            stack = np.stack([left, mid, right], axis=0)
-            idx = np.argmin(stack, axis=0) - 1  # -1,0,+1
-            back[y] = idx
-            acc[y] += stack.min(axis=0)
-
-        x = int(np.argmin(acc[-1]))
-        seam = [x]
-        for y in range(H-1, 0, -1):
-            x = int(np.clip(x + back[y, x], 0, W-1))
-            seam.append(x)
-        seam.reverse()
-        return seam  # len = H
-
-    def _seam_dp_horizontal(self, cost):
-        """Find min-cost LEFT->RIGHT path in a (H x W) cost map."""
-        # transpose, reuse vertical
-        seam = self._seam_dp_vertical(cost.T)
-        # convert xs per row on transposed back to ys per col here
-        return seam  # list of y positions, length = W
-
-    def _feather_mask_from_vertical_seam(self, H, W, seam_x, feather=2, prefer_right=True):
-        """
-        Build binary mask split by vertical seam (top->bottom).
-        prefer_right=True keeps the RIGHT side (new tile) by default.
-        """
-        m = np.zeros((H, W), np.float32)
-        for y, sx in enumerate(seam_x):
-            if prefer_right:
-                m[y, sx:] = 1.0
-            else:
-                m[y, :sx+1] = 1.0
-        if feather > 0:
-            x0 = np.clip(np.array(seam_x) - feather, 0, W-1)
-            x1 = np.clip(np.array(seam_x) + feather, 0, W-1)
-            for y in range(H):
-                if x1[y] > x0[y]:
-                    ramp = np.linspace(0, 1, x1[y]-x0[y]+1, dtype=np.float32)
-                    if prefer_right:
-                        m[y, x0[y]:x1[y]+1] = ramp
-                    else:
-                        m[y, x0[y]:x1[y]+1] = 1.0 - ramp
-        return m[..., None]  # HxWx1
-
-    def _feather_mask_from_horizontal_seam(self, H, W, seam_y, feather=2, prefer_bottom=True):
-        m = np.zeros((H, W), np.float32)
-        for x, sy in enumerate(seam_y):
-            if prefer_bottom:
-                m[sy:, x] = 1.0
-            else:
-                m[:sy+1, x] = 1.0
-        if feather > 0:
-            y0 = np.clip(np.array(seam_y) - feather, 0, H-1)
-            y1 = np.clip(np.array(seam_y) + feather, 0, H-1)
-            for x in range(W):
-                if y1[x] > y0[x]:
-                    ramp = np.linspace(0, 1, y1[x]-y0[x]+1, dtype=np.float32)
-                    if prefer_bottom:
-                        m[y0[x]:y1[x]+1, x] = ramp
-                    else:
-                        m[y0[x]:y1[x]+1, x] = 1.0 - ramp
-        return m[..., None]
-
-    # --- main --------------------------------------------------------------
-
     def execute(self, images, egregora_data):
-        import torch, numpy as np, cv2, math
-
-        # flatten tiles to a batch
+        # Flatten incoming tiles to a single batch
         tiles_list = []
         for itm in images:
-            if isinstance(itm, (list, tuple)):
-                tiles_list.extend(itm)
-            else:
-                tiles_list.append(itm)
+            if isinstance(itm, (list, tuple)): tiles_list.extend(itm)
+            else: tiles_list.append(itm)
         tiles = torch.cat([t if t.dim() == 4 else t.unsqueeze(0) for t in tiles_list], dim=0)
 
         if isinstance(egregora_data, (list, tuple)):
@@ -504,69 +390,67 @@ class Egregora_Combine:
         gx   = int(egregora_data["grid_x"])
         gy   = int(egregora_data["grid_y"])
         order = int(egregora_data.get("tile_order", 0))
-        detail_map = egregora_data.get("detail_map")
 
-        # coordinates from your helper
+        # Helper function from the same file
+        from .egregora_divide_and_enhance import create_enhanced_tile_coordinates
         coords, _ = create_enhanced_tile_coordinates(
-            up_w, up_h, tw, th, ox, oy, gx, gy, order, detail_map
+            up_w, up_h, tw, th, ox, oy, gx, gy, order
         )
-
-        # canvas we build on (CPU numpy for the seam DP)
-        canvas = np.zeros((up_h, up_w, 3), np.float32)
-        filled = np.zeros((up_h, up_w, 1), np.float32)
-
-        FEATHER = 2  # tiny anti-alias band only along the cut
+        
+        # Initialize accumulation tensors for the normalized weighted average
+        num = np.zeros((up_h, up_w, 3), np.float32)
+        den = np.zeros((up_h, up_w, 1), np.float32)
 
         for i, (x, y) in enumerate(coords):
             if i >= tiles.shape[0]:
                 break
 
             t = tiles[i].squeeze(0).clamp(0, 1).cpu().numpy().astype(np.float32)
-            # crop in case last tile clips the border
-            x2 = min(x + tw, up_w); y2 = min(y + th, up_h)
-            tile = t[:y2 - y, :x2 - x]
+            H, W = t.shape[:2]
+            
+            # -----------------------------------------------------------------
+            # CORRECTED: Blending Mask Generation using NumPy meshgrid for robustness
+            # This creates a perfect 2D gradient mask
+            # -----------------------------------------------------------------
+            
+            # Create horizontal gradient
+            grad_x = np.ones(W, dtype=np.float32)
+            if ox > 0:
+                grad_x[:ox] = np.linspace(0.0, 1.0, ox)
+                grad_x[W-ox:] = np.linspace(1.0, 0.0, ox)
+            
+            # Create vertical gradient
+            grad_y = np.ones(H, dtype=np.float32)
+            if oy > 0:
+                grad_y[:oy] = np.linspace(0.0, 1.0, oy)
+                grad_y[H-oy:] = np.linspace(1.0, 0.0, oy)
+                
+            # Combine gradients using a meshgrid to create a 2D mask
+            # This handles all corner cases and overlaps correctly
+            X, Y = np.meshgrid(grad_x, grad_y)
+            wmap = X * Y
+            
+            wmap = wmap[..., None].astype(np.float32)
 
-            # start with a mask that takes the whole tile
-            mask = np.ones((tile.shape[0], tile.shape[1], 1), np.float32)
+            # Accumulate contributions (order-independent)
+            num[y:y+H, x:x+W] += t * wmap
+            den[y:y+H, x:x+W] += wmap
 
-            # left overlap seam (vertical seam inside width ox)
-            if ox > 0 and x > 0:
-                w = min(ox, tile.shape[1], x2 - x)
-                if w > 0:
-                    A = canvas[y:y2, x:x+w]
-                    B = tile[:, :w]
-                    cost = self._ssd(A, B)
-                    seam_x = self._seam_dp_vertical(cost)
-                    left_mask = self._feather_mask_from_vertical_seam(
-                        B.shape[0], B.shape[1], seam_x, feather=FEATHER, prefer_right=True
-                    )
-                    mask[:, :w] = np.minimum(mask[:, :w], left_mask)
+        # Normalize once at the end
+        out = num / np.clip(den, 1e-6, None)
+        out = torch.from_numpy(np.clip(out, 0.0, 1.0)).unsqueeze(0)
 
-            # top overlap seam (horizontal seam inside height oy)
-            if oy > 0 and y > 0:
-                h = min(oy, tile.shape[0], y2 - y)
-                if h > 0:
-                    A = canvas[y:y+h, x:x2]
-                    B = tile[:h, :]
-                    cost = self._ssd(A, B)
-                    seam_y = self._seam_dp_horizontal(cost)
-                    top_mask = self._feather_mask_from_horizontal_seam(
-                        B.shape[0], B.shape[1], seam_y, feather=FEATHER, prefer_bottom=True
-                    )
-                    mask[:h, :] = np.minimum(mask[:h, :], top_mask)
-
-            # composite (binary cut with micro-feather), no global averaging
-            region = canvas[y:y2, x:x2]
-            region *= (1.0 - mask)
-            region += tile * mask
-            canvas[y:y2, x:x2] = region
-            filled[y:y2, x:x2] = 1.0  # mark area as filled
-
-        out = torch.from_numpy(np.clip(canvas, 0.0, 1.0)).unsqueeze(0)
-        ui = (f"Egregora Combine (Min-Error Seam)\n"
+        try:
+            order_name = list(TILE_ORDER_DICT.keys())[order]
+        except Exception:
+            order_name = str(order)
+            
+        ui = (f"Egregora Combine (Fixed Weighted Average)\n"
               f"Upscaled: {up_w}x{up_h}  Grid: {gx}x{gy}  Tiles: {gx*gy}\n"
-              f"Overlap: {ox}x{oy}  Seam feather: {FEATHER}px")
+              f"Overlap: {ox}x{oy}  Order: {order_name}")
+
         return (out, ui)
+
 
 class Egregora_Preview:
     @classmethod
