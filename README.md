@@ -4,7 +4,7 @@
 
 **⚡A set of ComfyUI nodes inspired by the Divide & Conquer algorithm, designed to split, enhance, and recombine images for high‑quality upscaling, with prompt mixing and analysis tools for cleaner, sharper results⚡**
 
-<img width="1615" height="789" alt="Suite Preview" src="https://github.com/user-attachments/assets/4cc5d352-75fa-4e80-808d-d6a246adbc4e" />
+<img width="1390" height="619" alt="image" src="https://github.com/user-attachments/assets/db49f88f-c6d4-4b74-899a-eb7e7edab5bb" />
 
 </center>
 
