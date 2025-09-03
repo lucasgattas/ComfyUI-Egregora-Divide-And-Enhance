@@ -394,53 +394,96 @@ class Egregora_Combine:
     FUNCTION = "execute"
     CATEGORY = "Egregora/Core"
 
-    # ---- helpers: pyramids ----
-    def _pyr_down(self, img):
-        import cv2, numpy as np
-        h, w = img.shape[:2]
-        # guard tiny sizes
-        if h < 2 or w < 2:
-            return img.copy()
-        return cv2.pyrDown(img)
+    # --- utilities ---------------------------------------------------------
 
-    def _pyr_up(self, img, size):
-        import cv2
-        up = cv2.pyrUp(img)
-        if up.shape[:2] != size:
-            up = cv2.resize(up, (size[1], size[0]), interpolation=cv2.INTER_LINEAR)
-        return up
+    def _ssd(self, a, b):
+        # squared color difference (float32), single-channel cost
+        d = a.astype(np.float32) - b.astype(np.float32)
+        return np.sum(d * d, axis=2)
 
-    def _build_gauss(self, img, levels):
-        G = [img]
-        for _ in range(levels - 1):
-            G.append(self._pyr_down(G[-1]))
-        return G
+    def _seam_dp_vertical(self, cost):
+        """
+        Find min-cost TOP->BOTTOM path in a (H x W) cost map.
+        Returns list of x positions (one per row).
+        """
+        H, W = cost.shape
+        acc = cost.copy()
+        back = np.zeros((H, W), np.int32)
 
-    def _build_lap(self, img, levels):
-        import numpy as np
-        G = self._build_gauss(img, levels)
-        L = []
-        for i in range(levels - 1):
-            up = self._pyr_up(G[i+1], G[i].shape[:2])
-            L.append(G[i] - up)
-        L.append(G[-1])  # top Gaussian
-        return L
+        for y in range(1, H):
+            prev = acc[y-1]
+            # three neighbors: x-1, x, x+1 (clamped)
+            left  = np.roll(prev, 1);  left[0]   = prev[0]
+            mid   = prev
+            right = np.roll(prev, -1); right[-1] = prev[-1]
+            stack = np.stack([left, mid, right], axis=0)
+            idx = np.argmin(stack, axis=0) - 1  # -1,0,+1
+            back[y] = idx
+            acc[y] += stack.min(axis=0)
 
-    def _linear_overlap_mask(self, th, tw, ox, oy, left, right, top, bottom):
-        # 2D separable linear ramp, limited strictly to overlap; no other params.
-        import numpy as np
-        wx = np.ones((tw,), dtype=np.float32)
-        wy = np.ones((th,), dtype=np.float32)
-        if left  and ox > 0:  wx[:ox]  = np.linspace(0.0, 1.0, ox, dtype=np.float32)
-        if right and ox > 0:  wx[-ox:] = np.linspace(1.0, 0.0, ox, dtype=np.float32)
-        if top   and oy > 0:  wy[:oy]  = np.linspace(0.0, 1.0, oy, dtype=np.float32)
-        if bottom and oy > 0: wy[-oy:] = np.linspace(1.0, 0.0, oy, dtype=np.float32)
-        return (wy[:, None] * wx[None, :]).clip(1e-6, 1.0)
+        x = int(np.argmin(acc[-1]))
+        seam = [x]
+        for y in range(H-1, 0, -1):
+            x = int(np.clip(x + back[y, x], 0, W-1))
+            seam.append(x)
+        seam.reverse()
+        return seam  # len = H
+
+    def _seam_dp_horizontal(self, cost):
+        """Find min-cost LEFT->RIGHT path in a (H x W) cost map."""
+        # transpose, reuse vertical
+        seam = self._seam_dp_vertical(cost.T)
+        # convert xs per row on transposed back to ys per col here
+        return seam  # list of y positions, length = W
+
+    def _feather_mask_from_vertical_seam(self, H, W, seam_x, feather=2, prefer_right=True):
+        """
+        Build binary mask split by vertical seam (top->bottom).
+        prefer_right=True keeps the RIGHT side (new tile) by default.
+        """
+        m = np.zeros((H, W), np.float32)
+        for y, sx in enumerate(seam_x):
+            if prefer_right:
+                m[y, sx:] = 1.0
+            else:
+                m[y, :sx+1] = 1.0
+        if feather > 0:
+            x0 = np.clip(np.array(seam_x) - feather, 0, W-1)
+            x1 = np.clip(np.array(seam_x) + feather, 0, W-1)
+            for y in range(H):
+                if x1[y] > x0[y]:
+                    ramp = np.linspace(0, 1, x1[y]-x0[y]+1, dtype=np.float32)
+                    if prefer_right:
+                        m[y, x0[y]:x1[y]+1] = ramp
+                    else:
+                        m[y, x0[y]:x1[y]+1] = 1.0 - ramp
+        return m[..., None]  # HxWx1
+
+    def _feather_mask_from_horizontal_seam(self, H, W, seam_y, feather=2, prefer_bottom=True):
+        m = np.zeros((H, W), np.float32)
+        for x, sy in enumerate(seam_y):
+            if prefer_bottom:
+                m[sy:, x] = 1.0
+            else:
+                m[:sy+1, x] = 1.0
+        if feather > 0:
+            y0 = np.clip(np.array(seam_y) - feather, 0, H-1)
+            y1 = np.clip(np.array(seam_y) + feather, 0, H-1)
+            for x in range(W):
+                if y1[x] > y0[x]:
+                    ramp = np.linspace(0, 1, y1[x]-y0[x]+1, dtype=np.float32)
+                    if prefer_bottom:
+                        m[y0[x]:y1[x]+1, x] = ramp
+                    else:
+                        m[y0[x]:y1[x]+1, x] = 1.0 - ramp
+        return m[..., None]
+
+    # --- main --------------------------------------------------------------
 
     def execute(self, images, egregora_data):
-        import torch, numpy as np, cv2
+        import torch, numpy as np, cv2, math
 
-        # Flatten tiles
+        # flatten tiles to a batch
         tiles_list = []
         for itm in images:
             if isinstance(itm, (list, tuple)):
@@ -448,7 +491,6 @@ class Egregora_Combine:
             else:
                 tiles_list.append(itm)
         tiles = torch.cat([t if t.dim() == 4 else t.unsqueeze(0) for t in tiles_list], dim=0)
-        device, dtype = tiles.device, tiles.dtype
 
         if isinstance(egregora_data, (list, tuple)):
             egregora_data = egregora_data[0]
@@ -464,75 +506,66 @@ class Egregora_Combine:
         order = int(egregora_data.get("tile_order", 0))
         detail_map = egregora_data.get("detail_map")
 
-        # Tile positions (reuse your coord func)
-        coords, _ = create_enhanced_tile_coordinates(up_w, up_h, tw, th, ox, oy, gx, gy, order, detail_map)
+        # coordinates from your helper
+        coords, _ = create_enhanced_tile_coordinates(
+            up_w, up_h, tw, th, ox, oy, gx, gy, order, detail_map
+        )
 
-        # Number of pyramid bands (cap to keep it fast)
-        # ~log2(min(tile)) - 2 works well; clamp [3,6]
-        min_side = max(1, min(th, tw))
-        levels = int(max(3, min(6, math.floor(math.log2(min_side)) - 2)))
+        # canvas we build on (CPU numpy for the seam DP)
+        canvas = np.zeros((up_h, up_w, 3), np.float32)
+        filled = np.zeros((up_h, up_w, 1), np.float32)
 
-        # Allocate accumulators for each level
-        lap_acc = []
-        w_acc   = []
-        H, W = up_h, up_w
-        for l in range(levels):
-            hL, wL = (H >> l), (W >> l)
-            lap_acc.append(np.zeros((hL, wL, 3), dtype=np.float32))
-            w_acc.append(np.zeros((hL, wL, 1), dtype=np.float32))
+        FEATHER = 2  # tiny anti-alias band only along the cut
 
-        # Process tiles
         for i, (x, y) in enumerate(coords):
             if i >= tiles.shape[0]:
                 break
-            t = tiles[i].squeeze(0).clamp(0, 1).to("cpu").numpy().astype(np.float32)  # HxWxC
 
-            # Mask limited to true overlap only
-            has_left   = (x > 0)
-            has_right  = (x + tw < up_w)
-            has_top    = (y > 0)
-            has_bottom = (y + th < up_h)
-            m = self._linear_overlap_mask(th, tw, ox, oy, has_left, has_right, has_top, has_bottom).astype(np.float32)
+            t = tiles[i].squeeze(0).clamp(0, 1).cpu().numpy().astype(np.float32)
+            # crop in case last tile clips the border
+            x2 = min(x + tw, up_w); y2 = min(y + th, up_h)
+            tile = t[:y2 - y, :x2 - x]
 
-            # Build pyramids for this tile
-            L = self._build_lap(t, levels)                  # list of 3-ch arrays
-            Gm = self._build_gauss(m, levels)               # list of 1-ch arrays
+            # start with a mask that takes the whole tile
+            mask = np.ones((tile.shape[0], tile.shape[1], 1), np.float32)
 
-            # Accumulate at each level
-            for l in range(levels):
-                # scaled coordinates at this level
-                xs = x >> l; ys = y >> l
-                lh, lw = L[l].shape[:2]
+            # left overlap seam (vertical seam inside width ox)
+            if ox > 0 and x > 0:
+                w = min(ox, tile.shape[1], x2 - x)
+                if w > 0:
+                    A = canvas[y:y2, x:x+w]
+                    B = tile[:, :w]
+                    cost = self._ssd(A, B)
+                    seam_x = self._seam_dp_vertical(cost)
+                    left_mask = self._feather_mask_from_vertical_seam(
+                        B.shape[0], B.shape[1], seam_x, feather=FEATHER, prefer_right=True
+                    )
+                    mask[:, :w] = np.minimum(mask[:, :w], left_mask)
 
-                # Ensure mask matches lap size (guards odd rounding)
-                ml = Gm[l]
-                if ml.shape[0] != lh or ml.shape[1] != lw:
-                    ml = cv2.resize(ml, (lw, lh), interpolation=cv2.INTER_LINEAR)
+            # top overlap seam (horizontal seam inside height oy)
+            if oy > 0 and y > 0:
+                h = min(oy, tile.shape[0], y2 - y)
+                if h > 0:
+                    A = canvas[y:y+h, x:x2]
+                    B = tile[:h, :]
+                    cost = self._ssd(A, B)
+                    seam_y = self._seam_dp_horizontal(cost)
+                    top_mask = self._feather_mask_from_horizontal_seam(
+                        B.shape[0], B.shape[1], seam_y, feather=FEATHER, prefer_bottom=True
+                    )
+                    mask[:h, :] = np.minimum(mask[:h, :], top_mask)
 
-                lap_acc[l][ys:ys+lh, xs:xs+lw, :] += L[l] * ml[:, :, None]
-                w_acc[l][ys:ys+lh, xs:xs+lw, :]   += ml[:, :, None]
+            # composite (binary cut with micro-feather), no global averaging
+            region = canvas[y:y2, x:x2]
+            region *= (1.0 - mask)
+            region += tile * mask
+            canvas[y:y2, x:x2] = region
+            filled[y:y2, x:x2] = 1.0  # mark area as filled
 
-        # Normalize each band and reconstruct
-        bands = []
-        for l in range(levels - 1):
-            w = np.clip(w_acc[l], 1e-6, None)
-            bands.append(lap_acc[l] / w)
-        # top Gaussian
-        top_w = np.clip(w_acc[-1], 1e-6, None)
-        current = lap_acc[-1] / top_w
-
-        for l in range(levels - 2, -1, -1):
-            current = self._pyr_up(current, bands[l].shape[:2]) + bands[l]
-
-        out = torch.from_numpy(np.clip(current, 0.0, 1.0)).to(device=device, dtype=dtype).unsqueeze(0)
-
-        try:
-            order_name = list(TILE_ORDER_DICT.keys())[order]
-        except Exception:
-            order_name = str(order)
-        ui = (f"Egregora Combine (Multiband)\n"
+        out = torch.from_numpy(np.clip(canvas, 0.0, 1.0)).unsqueeze(0)
+        ui = (f"Egregora Combine (Min-Error Seam)\n"
               f"Upscaled: {up_w}x{up_h}  Grid: {gx}x{gy}  Tiles: {gx*gy}\n"
-              f"Bands: {levels}  Method: Laplacian-pyramid multiband (Burt–Adelson)")
+              f"Overlap: {ox}x{oy}  Seam feather: {FEATHER}px")
         return (out, ui)
 
 class Egregora_Preview:
