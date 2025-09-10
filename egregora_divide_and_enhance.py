@@ -357,12 +357,23 @@ class Egregora_Divide_Select:
 import math, torch, numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
+import math
+import torch
+import numpy as np
+from typing import List, Tuple
+
+
 class Egregora_Combine:
     """
-    Seamless tile combiner with DaC-compat coords and two blend modes:
-      1) cosine_norm (default): alpha-normalized raised-cosine weights (no seams)
-      2) dac_gaussian: replicate DaC PIL-mask Gaussian blur (brightness may shift)
-    Switch coord source via egregora_data["coord_source"] in {"egregora","dac"}.
+    Egregora-order + DaC-style blend.
+
+    - Coordinates: uses create_enhanced_tile_coordinates (same as Divide & Select),
+      so order/positions match exactly.
+    - Mask: inner rectangle shrunk by overlap/4; blur BoxBlur if min(ox,oy) <= 64
+      else GaussianBlur; radius = sqrt(min(ox,oy)).
+    - Compositing: ORDER-DEPENDENT alpha-over (no normalization), like DaC.
+    - No color ops or seam-fix tricks; this is for 1:1 A/B with DaC
+      while staying consistent with Egregora’s tile order.
     """
 
     @classmethod
@@ -380,130 +391,71 @@ class Egregora_Combine:
     FUNCTION = "execute"
     CATEGORY = "Egregora/Core"
 
-    @staticmethod
-    def _raised_cosine_ramp(n, left, right, device, dtype, power=1.0):
-        x = torch.arange(n, device=device, dtype=dtype)
-        w = torch.ones(n, device=device, dtype=dtype)
-        if left > 0:
-            t = torch.clamp(x / float(max(left, 1)), 0.0, 1.0)
-            wl = 0.5 - 0.5 * torch.cos(math.pi * t)
-            w = torch.minimum(w, wl.pow(power) if power != 1.0 else wl)
-        if right > 0:
-            t = torch.clamp((n - 1 - x) / float(max(right, 1)), 0.0, 1.0)
-            wr = 0.5 - 0.5 * torch.cos(math.pi * t)
-            w = torch.minimum(w, wr.pow(power) if power != 1.0 else wr)
-        return w
-
-    def _coords(self, up_w, up_h, tw, th, ox, oy, gx, gy, order, coord_source):
-        if str(coord_source).lower() == "dac":
-            # DaC order/coords for 1:1 compatibility with DaC Divide node
-            from .DaC import create_tile_coordinates as coord_fn  # :contentReference[oaicite:2]{index=2}
-            coords, _ = coord_fn(up_w, up_h, tw, th, ox, oy, gx, gy, min(order, 1))
-        else:
-            # Egregora enhanced coords (spiral_in/out, serpentine, etc.)
-            from .egregora_divide_and_enhance import create_enhanced_tile_coordinates as coord_fn  # :contentReference[oaicite:3]{index=3}
-            coords, _ = coord_fn(up_w, up_h, tw, th, ox, oy, gx, gy, order)
+    # ---- coordinate helper: call Egregora's own generator ----
+    def _coords_egregora(self, W, H, tw, th, ox, oy, gx, gy, order, detail_map=None):
+        # Import from this same file/module (where the function lives)
+        from .egregora_divide_and_enhance import create_enhanced_tile_coordinates
+        coords, _ = create_enhanced_tile_coordinates(
+            W, H, tw, th, ox, oy, gx, gy, order, detail_map
+        )
         return coords
 
-    def _blend_cosine_norm(self, tiles, coords, up_w, up_h, ox, oy, feather_exp):
-        device, dtype = tiles.device, tiles.dtype
-        out = torch.zeros((1, up_h, up_w, 3), device=device, dtype=dtype)
-        wacc = torch.zeros((1, up_h, up_w, 1), device=device, dtype=dtype)
+    # ---- DaC-style blend (order-dependent alpha-over) ----
+    @staticmethod
+    def _blend_dac_mask(canvas, tile, xs, ys, Wroi, Hroi, ox, oy, up_w, up_h):
+        """
+        Create DaC-style mask for ROI and alpha-over into canvas.
+        """
+        device, dtype = canvas.device, canvas.dtype
+        xe, ye = xs + Wroi, ys + Hroi
 
-        T = tiles.shape[0]
-        for i, (x, y) in enumerate(coords):
-            if i >= T: break
-            tile = tiles[i].clamp(0, 1)
-            if tile.dim() == 4: tile = tile.squeeze(0)
-            H, W = tile.shape[0], tile.shape[1]
+        # Edges touching canvas?
+        at_left   = (xs == 0)
+        at_right  = (xe == up_w)
+        at_top    = (ys == 0)
+        at_bottom = (ye == up_h)
 
-            # Clamp ROI for safety (avoids 1px gutters from rounding)
-            xs, ys = max(0, x), max(0, y)
-            xe, ye = min(x + W, up_w), min(y + H, up_h)
-            if xe <= xs or ye <= ys: continue
-            Wroi, Hroi = (xe - xs), (ye - ys)
-            tile = tile[:Hroi, :Wroi, :]
+        shrink_x = max(0, ox // 4)
+        shrink_y = max(0, oy // 4)
 
-            # Ramps only where neighbors exist
-            left_ov   = min(ox, xs) if xs > 0 else 0
-            right_ov  = min(ox, up_w - xe) if xe < up_w else 0
-            top_ov    = min(oy, ys) if ys > 0 else 0
-            bottom_ov = min(oy, up_h - ye) if ye < up_h else 0
+        # Inner rectangle bounds (no shrink where touching canvas edges)
+        lx = 0 if at_left  else shrink_x
+        rx = Wroi if at_right else Wroi - shrink_x
+        ty = 0 if at_top   else shrink_y
+        by = Hroi if at_bottom else Hroi - shrink_y
 
-            wx = self._raised_cosine_ramp(Wroi, left_ov, right_ov, device, dtype, power=feather_exp)
-            wy = self._raised_cosine_ramp(Hroi, top_ov,  bottom_ov, device, dtype, power=feather_exp)
-            mask = (wy[:, None] * wx[None, :]).unsqueeze(-1)
+        # Build mask (PIL 'L'); right/bottom are inclusive -> subtract 1
+        mask = Image.new("L", (Wroi, Hroi), 0)
+        draw = ImageDraw.Draw(mask)
+        draw.rectangle([lx, ty, max(lx, rx - 1), max(ty, by - 1)], fill=255)
 
-            out[:, ys:ye, xs:xe, :] += tile * mask
-            wacc[:, ys:ye, xs:xe, :] += mask
+        blur_radius = float(max(1.0, math.sqrt(max(1, min(ox, oy)))))
+        if min(ox, oy) <= 64:
+            mask = mask.filter(ImageFilter.BoxBlur(radius=blur_radius))
+        else:
+            mask = mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
 
-        eps = torch.finfo(dtype).eps if dtype.is_floating_point else 1e-6
-        out = out / torch.clamp(wacc, min=eps)
-        return out.clamp(0, 1)
+        mask_np = (np.array(mask, dtype=np.float32) / 255.0)[..., None]  # (H,W,1)
+        mask_t = torch.from_numpy(mask_np).to(device=device, dtype=dtype).unsqueeze(0)  # (1,H,W,1)
 
-    def _blend_dac_gaussian(self, tiles, coords, up_w, up_h, tw, th, ox, oy):
-        # 1:1 DaC mask construction (PIL rectangle + Gaussian/Box blur)  :contentReference[oaicite:4]{index=4}
-        output = torch.zeros((1, up_h, up_w, 3), dtype=tiles.dtype, device=tiles.device)
-        overlap_factor = 4
-        f_overlap_x = ox // overlap_factor
-        f_overlap_y = oy // overlap_factor
-        blend_x = math.sqrt(max(1, ox))
-        blend_y = math.sqrt(max(1, oy))
+        # Alpha-over into canvas
+        roi = canvas[:, ys:ye, xs:xe, :]
+        canvas[:, ys:ye, xs:xe, :] = roi * (1.0 - mask_t) + tile.unsqueeze(0) * mask_t
 
-        for i, (x, y) in enumerate(coords):
-            if i >= tiles.shape[0]: break
-            image_tile = tiles[i].squeeze(0).clamp(0, 1)
-            H, W = image_tile.shape[0], image_tile.shape[1]
-
-            # Clamp ROI (edge safety)
-            xs, ys = max(0, x), max(0, y)
-            xe, ye = min(x + W, up_w), min(y + H, up_h)
-            if xe <= xs or ye <= ys: continue
-            Wroi, Hroi = (xe - xs), (ye - ys)
-            image_tile = image_tile[:Hroi, :Wroi, :]
-
-            # Build DaC-style mask for this ROI
-            mask = Image.new("L", (Wroi, Hroi), 0)
-            draw = ImageDraw.Draw(mask)
-
-            # Translate DaC’s if/elif grid to ROI; simplify by checking borders vs canvas
-            at_left   = (xs == 0)
-            at_right  = (xe == up_w)
-            at_top    = (ys == 0)
-            at_bottom = (ye == up_h)
-
-            # Inner rect (no feather on outside edges)
-            lx = 0 if at_left else f_overlap_x
-            rx = Wroi if at_right else Wroi - f_overlap_x
-            ty = 0 if at_top else f_overlap_y
-            by = Hroi if at_bottom else Hroi - f_overlap_y
-            draw.rectangle([lx, ty, rx, by], fill=255)
-
-            # Blur radius choice identical to DaC
-            if ox <= 64 or oy <= 64:
-                mask = mask.filter(ImageFilter.BoxBlur(radius=(blend_x, blend_y)))
-            else:
-                mask = mask.filter(ImageFilter.GaussianBlur(radius=(blend_x, blend_y)))
-
-            mask_np = np.array(mask, dtype=np.float32) / 255.0
-            mask_t  = torch.from_numpy(mask_np).to(tiles.device, tiles.dtype).unsqueeze(0).unsqueeze(-1)
-
-            output[:, ys:ye, xs:xe, :] *= (1 - mask_t)
-            output[:, ys:ye, xs:xe, :] += image_tile * mask_t
-
-        return output.clamp(0, 1)
-
+    # ---- main ----
     def execute(self, images, egregora_data):
-        # Flatten incoming tiles preserving order
+        # Flatten tiles preserving order
         flat = []
         for itm in images:
             if isinstance(itm, (list, tuple)): flat.extend(itm)
             else: flat.append(itm)
         tiles = torch.cat([t if t.dim() == 4 else t.unsqueeze(0) for t in flat], dim=0)
 
-        if isinstance(egregora_data, (list, tuple)):
+        # egregora_data may arrive wrapped
+        if isinstance(egregora_data, (list, tuple)) and len(egregora_data) == 1:
             egregora_data = egregora_data[0]
 
+        # Geometry straight from the algorithm node
         up_w = int(egregora_data["upscaled_width"])
         up_h = int(egregora_data["upscaled_height"])
         tw   = int(egregora_data["tile_width"])
@@ -513,31 +465,42 @@ class Egregora_Combine:
         gx   = int(egregora_data["grid_x"])
         gy   = int(egregora_data["grid_y"])
         order = int(egregora_data.get("tile_order", 0))
+        detail_map = egregora_data.get("detail_map", None)
 
-        coord_source = egregora_data.get("coord_source", "egregora")  # "egregora" or "dac"
-        blending_method = egregora_data.get("blending_method", "cosine_norm")  # or "dac_gaussian"
-        feather_exp = float(egregora_data.get("feather_exp", 1.0))
+        # Get coords using the SAME generator/order as Divide & Select
+        coords = self._coords_egregora(up_w, up_h, tw, th, ox, oy, gx, gy, order, detail_map)
 
-        coords = self._coords(up_w, up_h, tw, th, ox, oy, gx, gy, order, coord_source)
+        # Canvas
+        device, dtype = tiles.device, tiles.dtype
+        canvas = torch.zeros((1, up_h, up_w, 3), dtype=dtype, device=device)
 
-        if blending_method == "dac_gaussian":
-            output = self._blend_dac_gaussian(tiles, coords, up_w, up_h, tw, th, ox, oy)
-        else:
-            output = self._blend_cosine_norm(tiles, coords, up_w, up_h, ox, oy, feather_exp)
+        # Composite in that same order
+        T = tiles.shape[0]
+        for i, (x, y) in enumerate(coords):
+            if i >= T:
+                break
+            tile = tiles[i].squeeze(0).clamp(0, 1)  # (H,W,3)
+            H, W = int(tile.shape[0]), int(tile.shape[1])
 
-        # Pretty UI
-        try:
-            from .egregora_divide_and_enhance import TILE_ORDER_DICT as E_TOD  # :contentReference[oaicite:5]{index=5}
-            inv = {v:k for k,v in E_TOD.items()}
-            order_name = inv.get(order, str(order))
-        except Exception:
-            order_name = str(order)
+            # Clamp ROI to canvas
+            xs = max(0, int(x)); ys = max(0, int(y))
+            xe = min(xs + W, up_w); ye = min(ys + H, up_h)
+            if xe <= xs or ye <= ys:
+                continue
+            Wroi, Hroi = (xe - xs), (ye - ys)
 
-        ui = (f"Egregora Combine (coord:{coord_source}  blend:{blending_method})\n"
-              f"Upscaled: {up_w}x{up_h}  Grid: {gx}x{gy}  Tiles: {gx*gy}\n"
-              f"Overlap: {ox}x{oy}  Order: {order_name}  FeatherExp: {feather_exp:g}")
+            # Crop tile if the last row/col exceeds canvas
+            tile_roi = tile[:Hroi, :Wroi, :]
 
-        return (output, ui)
+            # DaC-style mask + alpha-over
+            self._blend_dac_mask(canvas, tile_roi, xs, ys, Wroi, Hroi, ox, oy, up_w, up_h)
+
+        ui = (f"Egregora-order + DaC-style Combine\n"
+              f"Canvas: {up_w}x{up_h}  Grid: {gx}x{gy} ({gx*gy} tiles)\n"
+              f"Overlap: {ox}x{oy}  Order: {order}  "
+              f"Mask: inner(shrink {ox//4},{oy//4}) + "
+              f"{'BoxBlur' if (min(ox,oy)<=64) else 'Gaussian'}(√min(ox,oy))")
+        return (canvas.clamp(0, 1), ui)
 
 
 class Egregora_Preview:
@@ -779,6 +742,7 @@ NODE_CLASS_MAPPINGS = {
     "Egregora Preview": Egregora_Preview,
     "Egregora Analyze Content": Egregora_Analyze_Content,
     "Egregora Turbo Prompt": Egregora_Turbo_Prompt,
+
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -788,4 +752,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Egregora Preview": "👁️ Egregora Preview",
     "Egregora Analyze Content": "🔍 Egregora Content Analysis",
     "Egregora Turbo Prompt": "🚀 Egregora Turbo Prompt",
+    
 }
