@@ -365,15 +365,15 @@ from typing import List, Tuple
 
 class Egregora_Combine:
     """
-    Egregora-order + DaC-style blend.
+    Egregora-order + DaC-style alpha-over with controllable edge-feather transparency.
 
     - Coordinates: uses create_enhanced_tile_coordinates (same as Divide & Select),
       so order/positions match exactly.
-    - Mask: inner rectangle shrunk by overlap/4; blur BoxBlur if min(ox,oy) <= 64
-      else GaussianBlur; radius = sqrt(min(ox,oy)).
-    - Compositing: ORDER-DEPENDENT alpha-over (no normalization), like DaC.
-    - No color ops or seam-fix tricks; this is for 1:1 A/B with DaC
-      while staying consistent with Egregora’s tile order.
+    - Per-tile analytic feather mask that goes to 0 (transparent) right at
+      tile borders, rising to 1 (opaque) over "feather_size" pixels.
+      Feather is applied ONLY on internal sides (not on outer canvas edges),
+      and clamped to the tile overlap so it cannot create holes.
+    - Compositing: ORDER-DEPENDENT alpha-over (no global normalization), like DaC.
     """
 
     @classmethod
@@ -382,6 +382,9 @@ class Egregora_Combine:
             "required": {
                 "images": ("IMAGE",),
                 "egregora_data": ("EGREGORA_DATA",),
+            },
+            "optional": {
+                "feather_size": ("INT", {"default": 16, "min": 0, "max": 2048, "step": 1}),
             },
         }
 
@@ -393,69 +396,94 @@ class Egregora_Combine:
 
     # ---- coordinate helper: call Egregora's own generator ----
     def _coords_egregora(self, W, H, tw, th, ox, oy, gx, gy, order, detail_map=None):
-        # Import from this same file/module (where the function lives)
         from .egregora_divide_and_enhance import create_enhanced_tile_coordinates
         coords, _ = create_enhanced_tile_coordinates(
             W, H, tw, th, ox, oy, gx, gy, order, detail_map
         )
         return coords
 
-    # ---- DaC-style blend (order-dependent alpha-over) ----
     @staticmethod
-    def _blend_dac_mask(canvas, tile, xs, ys, Wroi, Hroi, ox, oy, up_w, up_h):
-        """
-        Create DaC-style mask for ROI and alpha-over into canvas.
-        """
-        device, dtype = canvas.device, canvas.dtype
-        xe, ye = xs + Wroi, ys + Hroi
+    def _to_int_scalar(value, default=16):
+        """Unwrap lists/tuples/tensors and cast to int safely."""
+        import torch
+        v = value
+        if isinstance(v, (list, tuple)):
+            v = v[0] if len(v) else default
+        if isinstance(v, torch.Tensor):
+            v = v.detach().cpu().flatten().tolist()
+            v = v[0] if len(v) else default
+        try:
+            v = int(float(v))
+        except Exception:
+            v = default
+        return v
 
-        # Edges touching canvas?
+    @staticmethod
+    def _build_feather_mask(H, W, device, dtype,
+                            xs, ys, up_w, up_h,
+                            feather_size, overlap_x, overlap_y):
+        """
+        Analytic feather mask that is 0 at the ROI edges and rises linearly to 1
+        over 'feather_size' pixels, ONLY on sides that don't touch the canvas border.
+        The feather per-axis is clamped to the corresponding overlap to prevent gaps.
+        """
+        fx = max(0, min(int(feather_size), int(overlap_x), max(0, W - 1)))
+        fy = max(0, min(int(feather_size), int(overlap_y), max(0, H - 1)))
+
         at_left   = (xs == 0)
-        at_right  = (xe == up_w)
         at_top    = (ys == 0)
-        at_bottom = (ye == up_h)
+        at_right  = (xs + W == up_w)
+        at_bottom = (ys + H == up_h)
 
-        shrink_x = max(0, ox // 4)
-        shrink_y = max(0, oy // 4)
+        fl = 0 if at_left   else fx
+        fr = 0 if at_right  else fx
+        ft = 0 if at_top    else fy
+        fb = 0 if at_bottom else fy
 
-        # Inner rectangle bounds (no shrink where touching canvas edges)
-        lx = 0 if at_left  else shrink_x
-        rx = Wroi if at_right else Wroi - shrink_x
-        ty = 0 if at_top   else shrink_y
-        by = Hroi if at_bottom else Hroi - shrink_y
+        y = torch.arange(H, device=device, dtype=dtype)[:, None]  # (H,1)
+        x = torch.arange(W, device=device, dtype=dtype)[None, :]  # (1,W)
 
-        # Build mask (PIL 'L'); right/bottom are inclusive -> subtract 1
-        mask = Image.new("L", (Wroi, Hroi), 0)
-        draw = ImageDraw.Draw(mask)
-        draw.rectangle([lx, ty, max(lx, rx - 1), max(ty, by - 1)], fill=255)
+        dist_left   = x
+        dist_right  = (W - 1) - x
+        dist_top    = y
+        dist_bottom = (H - 1) - y
 
-        blur_radius = float(max(1.0, math.sqrt(max(1, min(ox, oy)))))
-        if min(ox, oy) <= 64:
-            mask = mask.filter(ImageFilter.BoxBlur(radius=blur_radius))
-        else:
-            mask = mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        one = torch.ones((H, W), device=device, dtype=dtype)
 
-        mask_np = (np.array(mask, dtype=np.float32) / 255.0)[..., None]  # (H,W,1)
-        mask_t = torch.from_numpy(mask_np).to(device=device, dtype=dtype).unsqueeze(0)  # (1,H,W,1)
+        def ramp(dist, f):
+            if f <= 0:
+                return one
+            return torch.clamp(dist / float(f), 0.0, 1.0)
 
-        # Alpha-over into canvas
-        roi = canvas[:, ys:ye, xs:xe, :]
-        canvas[:, ys:ye, xs:xe, :] = roi * (1.0 - mask_t) + tile.unsqueeze(0) * mask_t
+        mask_left   = ramp(dist_left,   fl)
+        mask_right  = ramp(dist_right,  fr)
+        mask_top    = ramp(dist_top,    ft)
+        mask_bottom = ramp(dist_bottom, fb)
 
-    # ---- main ----
-    def execute(self, images, egregora_data):
+        mask2d = torch.minimum(torch.minimum(mask_left, mask_right),
+                               torch.minimum(mask_top,  mask_bottom))
+        return mask2d.unsqueeze(0).unsqueeze(-1)  # (1,H,W,1)
+
+    def execute(self, images, egregora_data, feather_size=16):
         # Flatten tiles preserving order
         flat = []
         for itm in images:
-            if isinstance(itm, (list, tuple)): flat.extend(itm)
-            else: flat.append(itm)
+            if isinstance(itm, (list, tuple)):
+                flat.extend(itm)
+            else:
+                flat.append(itm)
         tiles = torch.cat([t if t.dim() == 4 else t.unsqueeze(0) for t in flat], dim=0)
 
-        # egregora_data may arrive wrapped
-        if isinstance(egregora_data, (list, tuple)) and len(egregora_data) == 1:
-            egregora_data = egregora_data[0]
+        # egregora_data may arrive wrapped (because INPUT_IS_LIST=True)
+        if isinstance(egregora_data, (list, tuple)):
+            egregora_data = egregora_data[0] if len(egregora_data) else {}
 
-        # Geometry straight from the algorithm node
+        # NEW: unwrap feather_size safely (it may arrive as [16] or a tensor)
+        feather_size = self._to_int_scalar(feather_size, default=16)
+        if feather_size < 0:
+            feather_size = 0
+
+        # Geometry from the algorithm node
         up_w = int(egregora_data["upscaled_width"])
         up_h = int(egregora_data["upscaled_height"])
         tw   = int(egregora_data["tile_width"])
@@ -467,7 +495,7 @@ class Egregora_Combine:
         order = int(egregora_data.get("tile_order", 0))
         detail_map = egregora_data.get("detail_map", None)
 
-        # Get coords using the SAME generator/order as Divide & Select
+        # Coordinates using same generator/order as Divide & Select
         coords = self._coords_egregora(up_w, up_h, tw, th, ox, oy, gx, gy, order, detail_map)
 
         # Canvas
@@ -479,27 +507,34 @@ class Egregora_Combine:
         for i, (x, y) in enumerate(coords):
             if i >= T:
                 break
+
             tile = tiles[i].squeeze(0).clamp(0, 1)  # (H,W,3)
             H, W = int(tile.shape[0]), int(tile.shape[1])
 
-            # Clamp ROI to canvas
             xs = max(0, int(x)); ys = max(0, int(y))
             xe = min(xs + W, up_w); ye = min(ys + H, up_h)
             if xe <= xs or ye <= ys:
                 continue
             Wroi, Hroi = (xe - xs), (ye - ys)
 
-            # Crop tile if the last row/col exceeds canvas
             tile_roi = tile[:Hroi, :Wroi, :]
 
-            # DaC-style mask + alpha-over
-            self._blend_dac_mask(canvas, tile_roi, xs, ys, Wroi, Hroi, ox, oy, up_w, up_h)
+            mask = self._build_feather_mask(
+                H=Hroi, W=Wroi, device=device, dtype=dtype,
+                xs=xs, ys=ys, up_w=up_w, up_h=up_h,
+                feather_size=feather_size, overlap_x=ox, overlap_y=oy
+            )  # (1,Hroi,Wroi,1)
 
+            roi = canvas[:, ys:ye, xs:xe, :]
+            canvas[:, ys:ye, xs:xe, :] = roi * (1.0 - mask) + tile_roi.unsqueeze(0) * mask
+
+        eff_fx = max(0, min(int(feather_size), ox))
+        eff_fy = max(0, min(int(feather_size), oy))
         ui = (f"Egregora-order + DaC-style Combine\n"
               f"Canvas: {up_w}x{up_h}  Grid: {gx}x{gy} ({gx*gy} tiles)\n"
-              f"Overlap: {ox}x{oy}  Order: {order}  "
-              f"Mask: inner(shrink {ox//4},{oy//4}) + "
-              f"{'BoxBlur' if (min(ox,oy)<=64) else 'Gaussian'}(√min(ox,oy))")
+              f"Overlap: {ox}x{oy}  Order: {order}\n"
+              f"Feather: request={feather_size}px  effective: {eff_fx}x{eff_fy}px "
+              f"(internal sides only; clamped to overlap)")
         return (canvas.clamp(0, 1), ui)
 
 
