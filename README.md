@@ -12,9 +12,17 @@
 
 ## ✨ What is this?
 
-**Egregora: Divide & Enhance** is a small suite of custom nodes that help you **split, enhance, and recombine** images, plus a clean **SDXL prompt mixer** that keeps things simple while staying robust with lot´s of customization.
+**Egregora: Divide & Enhance** is a small suite of custom nodes that help you **split, enhance, and recombine** images, plus a clean **SDXL prompt mixer** that keeps things simple while staying robust with lots of customization.
 
 Inspired by **Steudio’s Divide & Conquer** nodes, adapted and refactored to fit a streamlined upscaling workflow. 🧠✂️🧵
+
+> **Why it’s special**
+>
+> * **Deterministic plan**: the same coordinate generator drives both **Divide** and **Combine**, so tiles align 1:1.
+> * **Seam‑aware recomposition**: a controllable **edge‑feather transparency** (per‑tile) hides straight borders without creating gaps.
+> * **Order you can trust**: linear, serpentine, spiral (in/out), and content/dependency‑aware orders for stable, reproducible passes.
+> * **Preview before compute**: a visual overlay shows grid, overlaps, order, and feather zones.
+> * **Minimal prompts, strong conditioning**: a turbo prompt node that just works with SDXL (with blacklist support).
 
 ---
 
@@ -27,7 +35,7 @@ A minimal, predictable prompt builder:
 * **Positive** = `caption_text + global_positive_prompt` (plain concatenation; no weights).
 * **Negative** = `global_negative_prompt` only.
 * **Blacklist (optional):** removes whole‑word, case‑insensitive terms from the positive text before encoding.
-* Outputs **SDXL‑compatible CONDITIONING** with proper **`pooled_output`**.
+* Outputs **SDXL‑compatible CONDITIONING** with proper pooled output.
 
 **Typical wiring**
 
@@ -36,25 +44,70 @@ A minimal, predictable prompt builder:
 * `global_negative_prompt` ← artifacts to avoid
 * `blacklist_words` ← optional removals
 
+---
+
 ### 🧠 Egregora Algorithm
 
-Planner for Divide‑and‑Enhance upscaling. Computes tile layout given target size & overlap; supports tile ordering strategies and sensible defaults to avoid seams.
+Planner for Divide‑and‑Enhance upscaling.
+
+**What it does**
+
+* Computes an **upscaled canvas** that meets your **minimum scale factor**.
+* Derives a **grid** of tiles from your **tile width/height** and **overlap**.
+* Supports multiple **tile orders**: `linear`, `serpentine`, `spiral_outward`, `spiral_inward`, `content_aware`, and `dependency_optimized`.
+* Uses the same coordinate logic consumed by **Divide & Select** and **Combine**, ensuring **perfect positional consistency**.
+
+**Why it matters**
+
+* Prevents off‑by‑one and drift errors between split and merge phases.
+* Gives you predictable coverage for denoising/upscaling passes.
+
+---
 
 ### ✂️ Egregora Divide & Select
 
-Splits an image/latent according to the planner. You can pass all tiles, or pick specific ones for targeted enhancement.
+Splits an image according to the planner.
+
+**Highlights**
+
+* Emits **all tiles** or lets you **select a specific tile** for targeted enhancement.
+* Uses the **exact coordinates** and **order** from **Egregora Algorithm**.
+
+---
 
 ### 🔗 Egregora Combine
 
-Merges processed tiles back into a seamless image using robust blending (distance‑field / multi‑scale style approaches to avoid borders and repetition).
+Merges processed tiles back into a seamless image using **order‑dependent alpha‑over** with a **per‑tile edge‑feather mask**.
+
+**How the seam fix works**
+
+* Each tile gets an **analytic feather** that fades from **0 → 1** over a user‑controlled **`feather_size`**.
+* Feather is **applied only on internal sides** (outer canvas edges stay solid).
+* Effective feather is **clamped to the tile overlap**, so you **don’t create holes**.
+* Because the **same coordinates** are used as in Divide/Algorithm, the blend lands exactly where it should.
+
+**Tips**
+
+* Start with `feather_size` between **8–64 px**; keep it **≤ min(overlap\_x, overlap\_y)**.
+* Use **Preview** to visualize feather bands vs. overlaps.
+
+---
 
 ### 👁️ Egregora Preview
 
-Visual overlay to preview the tile grid, overlaps, and order, verify the plan before you spend compute.
+Visual overlay to preview the plan **before** you spend compute:
+
+* Draws **tile boundaries**, **overlap zones**, **processing order**, and **feather bands** for sanity checks.
+
+---
 
 ### 🔍 Egregora Content Analysis *(optional)*
 
-Analyzes complexity/detail to hint at better tile sizes or overlaps for tricky images.
+Analyzes gradient complexity to suggest:
+
+* **Feather size** (more for complex scenes),
+* **Overlap** adjustments, and
+* A recommended **blending method** mindset (feather‑first, then overlap).
 
 ---
 
@@ -83,7 +136,7 @@ git clone https://github.com/lucasgattas/comfyui-egregora-divide-and-enhance.git
 
    * *caption\_text* = your main description
    * *global\_positive\_prompt* = secondary style or theme
-   * *blacklist_words* = clean words from positive prompt (caption and global)
+   * *blacklist\_words* = clean words from positive prompt (caption and global)
 3. **KSampler** (Euler/Karras or your favorite)
 
    * Positive/Negative from Turbo Prompt, model & latent as usual.
@@ -101,23 +154,24 @@ Use **Algorithm → Divide & Select → \[process tiles] → Combine**. Start wi
 * **Download:** `examples/divide_and_enhance_example_workflow.json` (included in this repo).
 * **Import:** ComfyUI → Queue (☰) → **Load** → pick the JSON, or just drag it inside.
 
-> **Prefer a one‑click experience?** Run the **improved, full tuned upscaler** on the cloud with the best settings at **(https://egregoralabs.com)**.
+> **Prefer a one‑click experience?** Run the **improved, full tuned upscaler** on the cloud with the best settings at **([https://egregoralabs.com](https://egregoralabs.com))**.
 
 ---
 
 ## 🎚️ Practical Tips
 
 * Keep prompts **concise**; long texts dilute signal.
-* For realism vs. cartoon conflicts, add targeted **negatives** (e.g., `cartoon, plush, chibi`) so the portrait holds shape while the global style adds texture/color.
-* Turbo Prompt avoids fragile scheduling and mixes prompts via multiple conditionings (sampler‑level combine).
+* For realism vs. cartoon conflicts, add targeted **negatives** (e.g., `cartoon, plush, chibi`).
+* For seams: increase **overlap** a step *or* raise **feather\_size** (stay ≤ overlap). Use **Preview** to inspect.
+* Large tiles reduce passes but increase VRAM — balance tile size vs. overlap for your GPU.
 
 ---
 
 ## 🧪 Troubleshooting
 
 * **Flat/grey outputs** → raise steps slightly or increase the stronger slider; ensure the CLIP/model are SDXL compatible.
-* **Repetitions/Grid looks** → verify no external tiling patches are active; reduce extreme overlaps or tile size if using the Divide/Combine flow.
-* **Shape/key errors** → update to the latest version; Turbo Prompt sets `pooled_output` and ADM keys; make sure you pass a valid LATENT.
+* **Repetitions/Grid looks** → verify no external tiling patches are active; reduce extreme overlaps or tile size if using Divide/Combine.
+* **Shape/key errors** → update to the latest version; Turbo Prompt sets pooled output; make sure you pass a valid LATENT.
 
 ---
 
@@ -146,7 +200,3 @@ comfyui-egregora-divide-and-enhance/
 **GPL‑3.0** — see [LICENSE](LICENSE).
 
 ---
-
-### Changelog
-
-* **0.1.0** — Initial release: Turbo Prompt with latent‑sized ADM; Divide/Select/Combine/Preview/Analysis nodes.
