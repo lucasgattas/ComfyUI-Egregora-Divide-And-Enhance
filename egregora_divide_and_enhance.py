@@ -7,8 +7,10 @@ import re
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 import comfy.utils
 from comfy import model_management
-import cv2
-from scipy.ndimage import distance_transform_edt, gaussian_filter
+try:
+    import cv2
+except Exception:
+    cv2 = None
 from typing import Tuple, List, Dict, Optional
 
 # Constants and helper functions from the original file for reference
@@ -38,6 +40,11 @@ class ContentAnalyzer:
     @staticmethod
     def calculate_detail_map(image_tensor: torch.Tensor) -> np.ndarray:
         """Calculate detail/complexity map of image using gradient magnitude"""
+        if cv2 is None:
+            raise RuntimeError(
+                "OpenCV (cv2) is required for Egregora Analyze Content. "
+                "Please install opencv-python to use this node."
+            )
         image_np = image_tensor.squeeze(0).cpu().numpy()
         if len(image_np.shape) == 3:
             gray = np.dot(image_np, [0.299, 0.587, 0.114])
@@ -55,6 +62,27 @@ class ContentAnalyzer:
 def calculate_overlap(tile_size, overlap_fraction):
     """Calculate overlap with bounds checking"""
     return max(0, int(overlap_fraction * tile_size))
+
+def calculate_adaptive_overlap_fraction(W, H, tw, th):
+    """
+    Adaptive overlap heuristic:
+    - Larger tiles relative to the image need less overlap.
+    - Smaller tiles need more overlap to hide seams.
+    """
+    if W <= 0 or H <= 0:
+        return 0.125
+
+    ratio_w = tw / float(W)
+    ratio_h = th / float(H)
+    ratio = min(ratio_w, ratio_h)
+
+    if ratio >= 0.75:
+        return 1.0 / 16.0  # 0.0625
+    if ratio >= 0.50:
+        return 1.0 / 8.0   # 0.125
+    if ratio >= 0.33:
+        return 1.0 / 6.0   # ~0.1667
+    return 1.0 / 4.0       # 0.25
 
 def calculate_enhanced_blur_radius(overlap_x, overlap_y, blur_scale):
     """FIXED: Calculate blur radius with proper scaling - higher blur_scale = MORE blur"""
@@ -226,38 +254,44 @@ class Egregora_Algorithm:
 
     def _calc_grid(self, W, H, tw, th, ox, oy, min_sf):
         import math
+        # Overlap-flexible, minimal-tiles strategy:
+        # - Never increase overlap above user request.
+        # - Compute the smallest grid that meets min scale.
+        # - Reduce overlap if needed to avoid extra tiles.
         min_sf = max(min_sf, 1.0)
-        if W <= H:
-            m = math.ceil(min_sf * W / tw)
-            while True:
-                upW = tw * m
-                gx = math.ceil(upW / tw)
-                upW = tw * gx - ox * (gx - 1)
-                s = upW / W
-                if s >= min_sf: break
-                m += 1
-            upH = int(round(H * s))
-            gy = math.ceil((upH - oy) / max(1, (th - oy)))
-            oy = 0 if gy <= 1 else round((th * gy - upH) / (gy - 1))
-        else:
-            m = math.ceil(min_sf * H / th)
-            while True:
-                upH = th * m
-                gy = math.ceil(upH / th)
-                upH = th * gy - oy * (gy - 1)
-                s = upH / H
-                if s >= min_sf: break
-                m += 1
-            upW = int(round(W * s))
-            gx = math.ceil((upW - ox) / max(1, (tw - ox)))
-            ox = 0 if gx <= 1 else round((tw * gx - upW) / (gx - 1))
 
-        upW = max(tw, int(upW))
-        upH = max(th, int(upH))
-        gx = max(1, gx); gy = max(1, gy)
-        ox = max(0, min(ox, tw - 1))
-        oy = max(0, min(oy, th - 1))
-        return upW, upH, gx, gy, ox, oy
+        target_w = int(math.ceil(W * min_sf))
+        target_h = int(math.ceil(H * min_sf))
+
+        # Grid counts: minimal number of tiles to cover target size
+        gx = max(1, int(math.ceil(target_w / tw)))
+        gy = max(1, int(math.ceil(target_h / th)))
+
+        # Max overlap that still covers target size with this grid
+        if gx <= 1:
+            ox_eff = 0
+        else:
+            max_ox = (tw * gx - target_w) / float(gx - 1)
+            ox_eff = int(math.floor(max_ox))
+            ox_eff = max(0, min(ox_eff, ox))
+
+        if gy <= 1:
+            oy_eff = 0
+        else:
+            max_oy = (th * gy - target_h) / float(gy - 1)
+            oy_eff = int(math.floor(max_oy))
+            oy_eff = max(0, min(oy_eff, oy))
+
+        upW = int(tw * gx - ox_eff * (gx - 1))
+        upH = int(th * gy - oy_eff * (gy - 1))
+
+        # Safety clamps
+        upW = max(tw, upW)
+        upH = max(th, upH)
+        ox_eff = max(0, min(ox_eff, tw - 1))
+        oy_eff = max(0, min(oy_eff, th - 1))
+
+        return upW, upH, gx, gy, ox_eff, oy_eff
 
     def execute(self, image, tile_width, tile_height, min_overlap, min_scale_factor,
                 tile_order, scaling_method):
@@ -265,8 +299,10 @@ class Egregora_Algorithm:
         import comfy
         _, H, W, _ = image.shape
         ov = OVERLAP_DICT.get(min_overlap, 0.125)
-        ox = calculate_overlap(tile_width,  ov if ov != -1 else 0.0625)
-        oy = calculate_overlap(tile_height, ov if ov != -1 else 0.0625)
+        if ov == -1:
+            ov = calculate_adaptive_overlap_fraction(W, H, tile_width, tile_height)
+        ox = calculate_overlap(tile_width, ov)
+        oy = calculate_overlap(tile_height, ov)
 
         upW, upH, gx, gy, ox, oy = self._calc_grid(W, H, tile_width, tile_height, ox, oy, min_scale_factor)
 
@@ -396,7 +432,6 @@ class Egregora_Combine:
 
     # ---- coordinate helper: call Egregora's own generator ----
     def _coords_egregora(self, W, H, tw, th, ox, oy, gx, gy, order, detail_map=None):
-        from .egregora_divide_and_enhance import create_enhanced_tile_coordinates
         coords, _ = create_enhanced_tile_coordinates(
             W, H, tw, th, ox, oy, gx, gy, order, detail_map
         )
@@ -495,6 +530,11 @@ class Egregora_Combine:
         order = int(egregora_data.get("tile_order", 0))
         detail_map = egregora_data.get("detail_map", None)
 
+        # Clamp feather to avoid gaps with alpha-over compositing
+        # (effective <= overlap/2 on the tighter axis)
+        max_feather = max(0, min(ox, oy) // 2)
+        feather_size = min(feather_size, max_feather)
+
         # Coordinates using same generator/order as Divide & Select
         coords = self._coords_egregora(up_w, up_h, tw, th, ox, oy, gx, gy, order, detail_map)
 
@@ -533,7 +573,7 @@ class Egregora_Combine:
         ui = (f"Egregora-order + DaC-style Combine\n"
               f"Canvas: {up_w}x{up_h}  Grid: {gx}x{gy} ({gx*gy} tiles)\n"
               f"Overlap: {ox}x{oy}  Order: {order}\n"
-              f"Feather: request={feather_size}px  effective: {eff_fx}x{eff_fy}px "
+              f"Feather: effective={eff_fx}x{eff_fy}px (clamped <= overlap/2)\n"
               f"(internal sides only; clamped to overlap)")
         return (canvas.clamp(0, 1), ui)
 
@@ -548,6 +588,9 @@ class Egregora_Preview:
                 "show_grid": ("BOOLEAN", {"default": True}),
                 "show_overlap": ("BOOLEAN", {"default": True}),
                 "show_order": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "feather_size": ("INT", {"default": 32, "min": 0, "max": 2048, "step": 1}),
             }
         }
 
@@ -557,7 +600,7 @@ class Egregora_Preview:
     CATEGORY = "Egregora/Utils"
     DESCRIPTION = "Preview the tiling strategy with visual indicators for debugging seam issues."
 
-    def execute(self, image, egregora_data, show_grid, show_overlap, show_order):
+    def execute(self, image, egregora_data, show_grid, show_overlap, show_order, feather_size=32):
         _, height, width, _ = image.shape
         
         tile_width = egregora_data['tile_width']
@@ -585,7 +628,12 @@ class Egregora_Preview:
         order_color = (255, 255, 0, 255)   # Bright yellow for numbers
         feather_color = (0, 0, 255, 80)    # Blue for feather zones
 
-        feather_size = egregora_data.get('feather_size', 32)
+        if isinstance(feather_size, (list, tuple)):
+            feather_size = feather_size[0] if len(feather_size) else 32
+        try:
+            feather_size = int(feather_size)
+        except Exception:
+            feather_size = 32
 
         for idx, (x, y) in enumerate(tile_coordinates):
             if show_grid:
@@ -782,10 +830,10 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Egregora Algorithm": "🧠 Egregora Algorithm",
-    "Egregora Divide and Select": "✂️ Egregora Divide & Select", 
+    "Egregora Divide and Select": "✂️ Egregora Divide & Select",
     "Egregora Combine": "🔗 Egregora Combine",
     "Egregora Preview": "👁️ Egregora Preview",
     "Egregora Analyze Content": "🔍 Egregora Content Analysis",
     "Egregora Turbo Prompt": "🚀 Egregora Turbo Prompt",
-    
+
 }
