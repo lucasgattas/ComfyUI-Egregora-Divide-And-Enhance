@@ -28,7 +28,7 @@ Documentation = "https://github.com/lucasgattas/ComfyUI-Egregora-Divide-And-Enha
 "Bug Tracker" = "https://github.com/lucasgattas/ComfyUI-Egregora-Divide-And-Enhance/issues"
 
 [tool.comfy]
-PublisherId = ""
+PublisherId = "mrgattax"
 DisplayName = "ComfyUI-Egregora-Divide-And-Enhance"
 Icon = ""
 includes = [] 
