@@ -1,6 +1,6 @@
 [project]
 name = "egregora-divide-and-enhance"
-description = ""
+description = "A set of ComfyUI nodes inspired by Divide & Conquer, designed to split, enhance, and recombine images for high-quality upscaling, with prompt mixing and analysis tools for cleaner, sharper results "
 version = "1.0.0"
 license = {file = "LICENSE"} 
 # classifiers = [
