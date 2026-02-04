@@ -435,6 +435,9 @@ class Egregora_Combine:
             },
             "optional": {
                 "feather_size": ("INT", {"default": 16, "min": 0, "max": 2048, "step": 1}),
+                "blend_mode": (["normalized", "alpha_over"], {"default": "normalized"}),
+                "feather_curve": (["smoothstep", "linear", "cosine"], {"default": "smoothstep"}),
+                "feather_mode": (["overlap", "custom"], {"default": "overlap"}),
             },
         }
 
@@ -470,14 +473,15 @@ class Egregora_Combine:
     @staticmethod
     def _build_feather_mask(H, W, device, dtype,
                             xs, ys, up_w, up_h,
-                            feather_size, overlap_x, overlap_y):
+                            feather_size, overlap_x, overlap_y,
+                            feather_curve="smoothstep"):
         """
         Analytic feather mask that is 0 at the ROI edges and rises linearly to 1
         over 'feather_size' pixels, ONLY on sides that don't touch the canvas border.
         The feather per-axis is clamped to the corresponding overlap to prevent gaps.
         """
-        fx = max(0, min(int(feather_size), int(overlap_x), max(0, W - 1)))
-        fy = max(0, min(int(feather_size), int(overlap_y), max(0, H - 1)))
+        fx = max(0, min(int(feather_size), max(0, W - 1)))
+        fy = max(0, min(int(feather_size), max(0, H - 1)))
 
         at_left   = (xs == 0)
         at_top    = (ys == 0)
@@ -502,18 +506,19 @@ class Egregora_Combine:
         def ramp(dist, f):
             if f <= 0:
                 return one
-            return torch.clamp(dist / float(f), 0.0, 1.0)
+            t = torch.clamp(dist / float(f), 0.0, 1.0)
+            return t * t * (3.0 - 2.0 * t)
 
         mask_left   = ramp(dist_left,   fl)
         mask_right  = ramp(dist_right,  fr)
         mask_top    = ramp(dist_top,    ft)
         mask_bottom = ramp(dist_bottom, fb)
 
-        mask2d = torch.minimum(torch.minimum(mask_left, mask_right),
-                               torch.minimum(mask_top,  mask_bottom))
+        # Multiplicative mask produces a smooth 2D falloff without ridges.
+        mask2d = (mask_left * mask_right) * (mask_top * mask_bottom)
         return mask2d.unsqueeze(0).unsqueeze(-1)  # (1,H,W,1)
 
-    def execute(self, images, egregora_data, feather_size=16):
+    def execute(self, images, egregora_data, feather_size=16, blend_mode="normalized", feather_curve="smoothstep", feather_mode="overlap"):
         # Flatten tiles preserving order
         flat = []
         for itm in images:
@@ -544,10 +549,13 @@ class Egregora_Combine:
         order = int(egregora_data.get("tile_order", 0))
         detail_map = egregora_data.get("detail_map", None)
 
-        # Clamp feather to avoid gaps with alpha-over compositing
-        # (effective <= overlap/2 on the tighter axis)
-        max_feather = max(0, min(ox, oy) // 2)
-        feather_size = min(feather_size, max_feather)
+        # For normalized blending, use full overlap fade by default.
+        # For alpha_over, clamp to avoid gaps.
+        if feather_mode == "overlap":
+            feather_size = max(0, min(ox, oy))
+        if blend_mode == "alpha_over":
+            max_feather = max(0, min(ox, oy) // 2)
+            feather_size = min(feather_size, max_feather)
 
         # Coordinates using same generator/order as Divide & Select
         coords = self._coords_egregora(up_w, up_h, tw, th, ox, oy, gx, gy, order, detail_map)
@@ -555,6 +563,9 @@ class Egregora_Combine:
         # Canvas
         device, dtype = tiles.device, tiles.dtype
         canvas = torch.zeros((1, up_h, up_w, 3), dtype=dtype, device=device)
+        weight_sum = None
+        if blend_mode == "normalized":
+            weight_sum = torch.zeros((1, up_h, up_w, 1), dtype=dtype, device=device)
 
         # Composite in that same order
         T = tiles.shape[0]
@@ -579,15 +590,25 @@ class Egregora_Combine:
                 feather_size=feather_size, overlap_x=ox, overlap_y=oy
             )  # (1,Hroi,Wroi,1)
 
-            roi = canvas[:, ys:ye, xs:xe, :]
-            canvas[:, ys:ye, xs:xe, :] = roi * (1.0 - mask) + tile_roi.unsqueeze(0) * mask
+            if blend_mode == "normalized":
+                roi = canvas[:, ys:ye, xs:xe, :]
+                wroi = weight_sum[:, ys:ye, xs:xe, :]
+                canvas[:, ys:ye, xs:xe, :] = roi + tile_roi.unsqueeze(0) * mask
+                weight_sum[:, ys:ye, xs:xe, :] = wroi + mask
+            else:
+                roi = canvas[:, ys:ye, xs:xe, :]
+                canvas[:, ys:ye, xs:xe, :] = roi * (1.0 - mask) + tile_roi.unsqueeze(0) * mask
 
         eff_fx = max(0, min(int(feather_size), ox))
         eff_fy = max(0, min(int(feather_size), oy))
-        ui = (f"Egregora-order + DaC-style Combine\n"
+        if blend_mode == "normalized":
+            denom = torch.clamp(weight_sum, min=1e-6)
+            canvas = canvas / denom
+
+        ui = (f"Egregora Combine ({blend_mode}, {feather_curve})\n"
               f"Canvas: {up_w}x{up_h}  Grid: {gx}x{gy} ({gx*gy} tiles)\n"
               f"Overlap: {ox}x{oy}  Order: {order}\n"
-              f"Feather: effective={eff_fx}x{eff_fy}px (clamped <= overlap/2)\n"
+              f"Feather: effective={eff_fx}x{eff_fy}px\n"
               f"(internal sides only; clamped to overlap)")
         return (canvas.clamp(0, 1), ui)
 
