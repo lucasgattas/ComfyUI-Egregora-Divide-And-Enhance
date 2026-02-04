@@ -267,18 +267,32 @@ class Egregora_Algorithm:
         gx = max(1, int(math.ceil(target_w / tw)))
         gy = max(1, int(math.ceil(target_h / th)))
 
+        # If the user requested overlap (>0), keep it even if it requires more tiles.
+        # This prevents overlap collapsing to 0 (hard seams).
+        def max_overlap_for_grid(total, tile, grid):
+            if grid <= 1:
+                return 0
+            return (tile * grid - total) / float(grid - 1)
+
+        if ox > 0:
+            while max_overlap_for_grid(target_w, tw, gx) < ox:
+                gx += 1
+        if oy > 0:
+            while max_overlap_for_grid(target_h, th, gy) < oy:
+                gy += 1
+
         # Max overlap that still covers target size with this grid
         if gx <= 1:
             ox_eff = 0
         else:
-            max_ox = (tw * gx - target_w) / float(gx - 1)
+            max_ox = max_overlap_for_grid(target_w, tw, gx)
             ox_eff = int(math.floor(max_ox))
             ox_eff = max(0, min(ox_eff, ox))
 
         if gy <= 1:
             oy_eff = 0
         else:
-            max_oy = (th * gy - target_h) / float(gy - 1)
+            max_oy = max_overlap_for_grid(target_h, th, gy)
             oy_eff = int(math.floor(max_oy))
             oy_eff = max(0, min(oy_eff, oy))
 
