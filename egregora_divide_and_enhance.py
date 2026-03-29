@@ -1,247 +1,460 @@
-import sys
-import os
-import torch
 import math
+from typing import Dict, List, Optional, Tuple, Union
+
 import numpy as np
-import re
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
+import torch
+from PIL import Image, ImageDraw, ImageFilter
+
 import comfy.utils
-from comfy import model_management
+
 try:
     import cv2
 except Exception:
     cv2 = None
-from typing import Tuple, List, Dict, Optional
 
-# Constants and helper functions from the original file for reference
+
 OVERLAP_DICT = {
-    "None": 0, "1/64 Tile": 0.015625, "1/32 Tile": 0.03125,
-    "1/16 Tile": 0.0625, "1/8 Tile": 0.125, "1/4 Tile": 0.25,
-    "1/2 Tile": 0.5, "Adaptive": -1,
+    "None": 0.0,
+    "1/64 Tile": 1.0 / 64.0,
+    "1/32 Tile": 1.0 / 32.0,
+    "1/16 Tile": 1.0 / 16.0,
+    "1/8 Tile": 1.0 / 8.0,
+    "1/4 Tile": 1.0 / 4.0,
+    "1/2 Tile": 1.0 / 2.0,
+    "Adaptive": -1.0,
 }
 
 TILE_ORDER_DICT = {
-    "linear": 0, "spiral_outward": 1, "spiral_inward": 2,
-    "serpentine": 3, "content_aware": 4, "dependency_optimized": 5
+    "linear": 0,
+    "spiral_outward": 1,
+    "spiral_inward": 2,
+    "serpentine": 3,
+    "content_aware": 4,
+    "dependency_optimized": 5,
 }
 
 BLENDING_METHODS = [
-    "gaussian_blur", "multi_scale", "distance_field",
-    "frequency_domain", "advanced_feather"
+    "gaussian_blur",
+    "multi_scale",
+    "distance_field",
+    "frequency_domain",
+    "advanced_feather",
 ]
 
 SCALING_METHODS = [
-    "nearest-exact", "bilinear", "area", "bicubic", "lanczos"
+    "nearest-exact",
+    "bilinear",
+    "area",
+    "bicubic",
+    "lanczos",
 ]
 
+
+def _clamp_int(value: int, low: int, high: int) -> int:
+    return max(low, min(high, int(value)))
+
+
 class ContentAnalyzer:
-    """Analyzes image content to optimize tiling strategy"""
-    
+    """Analyzes image content to optimize tiling strategy."""
+
     @staticmethod
     def calculate_detail_map(image_tensor: torch.Tensor) -> np.ndarray:
-        """Calculate detail/complexity map of image using gradient magnitude"""
         if cv2 is None:
             raise RuntimeError(
                 "OpenCV (cv2) is required for Egregora Analyze Content. "
                 "Please install opencv-python to use this node."
             )
+
         image_np = image_tensor.squeeze(0).cpu().numpy()
         if len(image_np.shape) == 3:
-            gray = np.dot(image_np, [0.299, 0.587, 0.114])
+            gray = np.dot(image_np[..., :3], [0.299, 0.587, 0.114])
         else:
             gray = image_np
-            
+
         grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        
         gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
         detail_map = cv2.GaussianBlur(gradient_magnitude, (15, 15), 0)
-        
         return detail_map
 
-def calculate_overlap(tile_size, overlap_fraction):
-    """Calculate overlap with bounds checking"""
-    return max(0, int(overlap_fraction * tile_size))
 
-def calculate_adaptive_overlap_fraction(W, H, tw, th):
-    """
-    Adaptive overlap heuristic:
-    - Larger tiles relative to the image need less overlap.
-    - Smaller tiles need more overlap to hide seams.
-    """
-    if W <= 0 or H <= 0:
+def calculate_overlap(tile_resolution: int, overlap_fraction: float) -> int:
+    return max(0, int(round(tile_resolution * overlap_fraction)))
+
+
+def calculate_adaptive_overlap_fraction(
+    width: int,
+    height: int,
+    tile_resolution: int,
+    target_long_side: int,
+) -> float:
+    if width <= 0 or height <= 0 or target_long_side <= 0:
         return 0.125
 
-    ratio_w = tw / float(W)
-    ratio_h = th / float(H)
-    ratio = min(ratio_w, ratio_h)
+    long_side = max(target_long_side, max(width, height))
+    ratio = tile_resolution / float(long_side)
 
     if ratio >= 0.75:
-        return 1.0 / 16.0  # 0.0625
+        return 1.0 / 16.0
     if ratio >= 0.50:
-        return 1.0 / 8.0   # 0.125
+        return 1.0 / 8.0
     if ratio >= 0.33:
-        return 1.0 / 6.0   # ~0.1667
-    return 1.0 / 4.0       # 0.25
+        return 1.0 / 6.0
+    return 1.0 / 4.0
 
-def calculate_enhanced_blur_radius(overlap_x, overlap_y, blur_scale):
-    """FIXED: Calculate blur radius with proper scaling - higher blur_scale = MORE blur"""
+
+def calculate_enhanced_blur_radius(overlap_x: int, overlap_y: int, blur_scale: float) -> int:
     max_overlap = max(overlap_x, overlap_y)
     if max_overlap <= 0:
         return 0
-    
-    # Fixed logic: higher blur_scale should create MORE blur
-    min_blur = max(1, int(max_overlap * 0.1))  # Minimum 10% of overlap
-    max_blur = max(min_blur, int(max_overlap * 0.8))  # Maximum 80% of overlap
-    
-    # Linear interpolation: 0.0 = min_blur, 1.0 = max_blur
+
+    min_blur = max(1, int(max_overlap * 0.10))
+    max_blur = max(min_blur, int(max_overlap * 0.80))
     blur_scale = max(0.0, min(1.0, blur_scale))
     blur_radius = int(min_blur + (max_blur - min_blur) * blur_scale)
-    
     return max(1, blur_radius)
 
-def create_enhanced_tile_coordinates(image_width: int, image_height: int, 
-                                   tile_width: int, tile_height: int,
-                                   overlap_x: int, overlap_y: int,
-                                   grid_x: int, grid_y: int,
-                                   tile_order: int,
-                                   detail_map: Optional[np.ndarray] = None) -> Tuple[List[Tuple[int, int]], List[List[str]]]:
-    """Enhanced tile coordinate generation with multiple ordering strategies"""
-    
-    tiles = []
-    matrix = [['' for _ in range(grid_x)] for _ in range(grid_y)]
-    
-    for row in range(grid_y):
-        y = row * (tile_height - overlap_y)
-        if row == grid_y - 1:
-            y = image_height - tile_height
-        for col in range(grid_x):
-            x = col * (tile_width - overlap_x)
-            if col == grid_x - 1:
-                x = image_width - tile_width
-            tiles.append((max(0, x), max(0, y)))
-    
-    # Apply different ordering strategies
-    if tile_order == 1:  # Spiral outward
-        tiles = _spiral_order(tiles, grid_x, grid_y, outward=True)
-    elif tile_order == 2:  # Spiral inward
-        tiles = _spiral_order(tiles, grid_x, grid_y, outward=False)
-    elif tile_order == 3:  # Serpentine
-        tiles = _serpentine_order(tiles, grid_x, grid_y)
-    elif tile_order == 4:  # Content aware
-        if detail_map is not None:
-            tiles = _content_aware_order(tiles, grid_x, grid_y, detail_map, tile_width, tile_height)
-    elif tile_order == 5:  # Dependency optimized
-        tiles = _dependency_optimized_order(tiles, grid_x, grid_y)
-    
-    # Rebuild matrix for display
-    for i, (x, y) in enumerate(tiles):
-        row = min(grid_y - 1, max(0, y // max(1, tile_height - overlap_y)))
-        col = min(grid_x - 1, max(0, x // max(1, tile_width - overlap_x)))
-        matrix[row][col] = f"{i + 1} ({x},{y})"
-    
-    return tiles, matrix
 
-def _spiral_order(tiles: List[Tuple[int, int]], grid_x: int, grid_y: int, outward: bool = True) -> List[Tuple[int, int]]:
-    """Generate spiral tile order"""
-    if not tiles:
-        return tiles
-        
-    spiral_tiles = []
-    visited = set()
-    
+def _fit_long_side(width: int, height: int, target_long_side: int) -> Tuple[int, int]:
+    if width <= 0 or height <= 0:
+        return 1, 1
+
+    if target_long_side <= 0:
+        return width, height
+
+    long_side = max(width, height)
+    if long_side == target_long_side:
+        return width, height
+
+    scale = target_long_side / float(long_side)
+    fitted_w = max(1, int(round(width * scale)))
+    fitted_h = max(1, int(round(height * scale)))
+    return fitted_w, fitted_h
+
+
+def _partition_length(total: int, parts: int) -> List[int]:
+    parts = max(1, parts)
+    base = total // parts
+    remainder = total % parts
+    result = []
+    for i in range(parts):
+        result.append(base + (1 if i < remainder else 0))
+    return result
+
+
+def _compute_grid(
+    up_w: int,
+    up_h: int,
+    tile_resolution: int,
+) -> Tuple[int, int]:
+    tile_resolution = max(64, int(tile_resolution))
+    grid_x = max(1, int(math.ceil(up_w / float(tile_resolution))))
+    grid_y = max(1, int(math.ceil(up_h / float(tile_resolution))))
+    return grid_x, grid_y
+
+
+def _build_tile_boxes(
+    image_width: int,
+    image_height: int,
+    grid_x: int,
+    grid_y: int,
+    overlap_x: int,
+    overlap_y: int,
+) -> List[Dict[str, int]]:
+    col_widths = _partition_length(image_width, grid_x)
+    row_heights = _partition_length(image_height, grid_y)
+
+    xs = [0]
+    ys = [0]
+    for w in col_widths:
+        xs.append(xs[-1] + w)
+    for h in row_heights:
+        ys.append(ys[-1] + h)
+
+    left_extra = overlap_x // 2
+    right_extra = overlap_x - left_extra
+    top_extra = overlap_y // 2
+    bottom_extra = overlap_y - top_extra
+
+    boxes: List[Dict[str, int]] = []
+    for row in range(grid_y):
+        for col in range(grid_x):
+            base_x1 = xs[col]
+            base_x2 = xs[col + 1]
+            base_y1 = ys[row]
+            base_y2 = ys[row + 1]
+
+            x1 = base_x1 if col == 0 else max(0, base_x1 - left_extra)
+            x2 = base_x2 if col == grid_x - 1 else min(image_width, base_x2 + right_extra)
+            y1 = base_y1 if row == 0 else max(0, base_y1 - top_extra)
+            y2 = base_y2 if row == grid_y - 1 else min(image_height, base_y2 + bottom_extra)
+
+            boxes.append(
+                {
+                    "row": row,
+                    "col": col,
+                    "x": int(x1),
+                    "y": int(y1),
+                    "w": int(max(1, x2 - x1)),
+                    "h": int(max(1, y2 - y1)),
+                    "base_x": int(base_x1),
+                    "base_y": int(base_y1),
+                    "base_w": int(max(1, base_x2 - base_x1)),
+                    "base_h": int(max(1, base_y2 - base_y1)),
+                }
+            )
+    return boxes
+
+
+def _tile_display_matrix(
+    boxes: List[Dict[str, int]],
+    ordered_indices: List[int],
+    grid_x: int,
+    grid_y: int,
+) -> List[List[str]]:
+    matrix = [["" for _ in range(grid_x)] for _ in range(grid_y)]
+    for order_idx, box_idx in enumerate(ordered_indices, start=1):
+        box = boxes[box_idx]
+        matrix[box["row"]][box["col"]] = (
+            f"{order_idx} ({box['x']},{box['y']}) {box['w']}x{box['h']}"
+        )
+    return matrix
+
+
+def _spiral_order_indices(grid_x: int, grid_y: int, outward: bool = True) -> List[int]:
+    if grid_x <= 0 or grid_y <= 0:
+        return []
+
     cx, cy = grid_x // 2, grid_y // 2
     x, y = cx, cy
     dx, dy = 1, 0
     layer = 1
-    
-    if 0 <= x < grid_x and 0 <= y < grid_y:
-        idx = y * grid_x + x
-        if idx < len(tiles):
-            spiral_tiles.append(tiles[idx])
-            visited.add((x, y))
-    
-    while len(spiral_tiles) < len(tiles):
+
+    visited = set()
+    order: List[int] = []
+
+    def append_if_valid(px: int, py: int):
+        if 0 <= px < grid_x and 0 <= py < grid_y and (px, py) not in visited:
+            visited.add((px, py))
+            order.append(py * grid_x + px)
+
+    append_if_valid(x, y)
+    while len(order) < grid_x * grid_y:
         for _ in range(2):
             for _ in range(layer):
-                if 0 <= x < grid_x and 0 <= y < grid_y and (x, y) not in visited:
-                    idx = y * grid_x + x
-                    if idx < len(tiles):
-                        spiral_tiles.append(tiles[idx])
-                        visited.add((x, y))
                 x += dx
                 y += dy
+                append_if_valid(x, y)
             dx, dy = -dy, dx
         layer += 1
-    
-    return spiral_tiles if outward else spiral_tiles[::-1]
 
-def _serpentine_order(tiles: List[Tuple[int, int]], grid_x: int, grid_y: int) -> List[Tuple[int, int]]:
-    """Generate serpentine (snake-like) tile order"""
-    serpentine_tiles = []
-    
+    return order if outward else list(reversed(order))
+
+
+def _serpentine_order_indices(grid_x: int, grid_y: int) -> List[int]:
+    order: List[int] = []
     for row in range(grid_y):
         if row % 2 == 0:
-            for col in range(grid_x):
-                idx = row * grid_x + col
-                if idx < len(tiles):
-                    serpentine_tiles.append(tiles[idx])
+            cols = range(grid_x)
         else:
-            for col in range(grid_x - 1, -1, -1):
-                idx = row * grid_x + col
-                if idx < len(tiles):
-                    serpentine_tiles.append(tiles[idx])
-    
-    return serpentine_tiles
+            cols = range(grid_x - 1, -1, -1)
+        for col in cols:
+            order.append(row * grid_x + col)
+    return order
 
-def _content_aware_order(tiles: List[Tuple[int, int]], grid_x: int, grid_y: int,
-                        detail_map: np.ndarray, tile_width: int, tile_height: int) -> List[Tuple[int, int]]:
-    """Order tiles by content complexity (high detail first)"""
-    
-    def get_tile_complexity(tile_coord):
-        x, y = tile_coord
-        h, w = detail_map.shape
-        
-        x1, x2 = max(0, x), min(w, x + tile_width)
-        y1, y2 = max(0, y), min(h, y + tile_height)
-        
+
+def _content_aware_order_indices(
+    boxes: List[Dict[str, int]],
+    detail_map: np.ndarray,
+) -> List[int]:
+    scored: List[Tuple[int, float]] = []
+    h, w = detail_map.shape[:2]
+    for idx, box in enumerate(boxes):
+        x1 = _clamp_int(box["x"], 0, w)
+        y1 = _clamp_int(box["y"], 0, h)
+        x2 = _clamp_int(box["x"] + box["w"], 0, w)
+        y2 = _clamp_int(box["y"] + box["h"], 0, h)
         if x2 > x1 and y2 > y1:
-            return np.mean(detail_map[y1:y2, x1:x2])
-        return 0.0
-    
-    tiles_with_complexity = [(tile, get_tile_complexity(tile)) for tile in tiles]
-    tiles_with_complexity.sort(key=lambda x: x[1], reverse=True)
-    
-    return [tile for tile, _ in tiles_with_complexity]
-
-def _dependency_optimized_order(tiles: List[Tuple[int, int]], grid_x: int, grid_y: int) -> List[Tuple[int, int]]:
-    """Order tiles to minimize dependencies"""
-    
-    def get_tile_priority(idx):
-        row, col = idx // grid_x, idx % grid_x
-        
-        if (row == 0 or row == grid_y - 1) and (col == 0 or col == grid_x - 1):
-            return 0
-        elif row == 0 or row == grid_y - 1 or col == 0 or col == grid_x - 1:
-            return 1
+            score = float(np.mean(detail_map[y1:y2, x1:x2]))
         else:
-            return 2
-    
-    indexed_tiles = [(i, tiles[i], get_tile_priority(i)) for i in range(len(tiles))]
-    indexed_tiles.sort(key=lambda x: (x[2], x[0]))
-    
-    return [tile for _, tile, _ in indexed_tiles]
+            score = 0.0
+        scored.append((idx, score))
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return [idx for idx, _ in scored]
+
+
+def _dependency_optimized_order_indices(grid_x: int, grid_y: int) -> List[int]:
+    scored: List[Tuple[int, int]] = []
+    for row in range(grid_y):
+        for col in range(grid_x):
+            idx = row * grid_x + col
+            if (row in (0, grid_y - 1)) and (col in (0, grid_x - 1)):
+                priority = 0
+            elif row in (0, grid_y - 1) or col in (0, grid_x - 1):
+                priority = 1
+            else:
+                priority = 2
+            scored.append((idx, priority))
+    scored.sort(key=lambda item: (item[1], item[0]))
+    return [idx for idx, _ in scored]
+
+
+def build_ordered_tile_plan(
+    image_width: int,
+    image_height: int,
+    tile_resolution: int,
+    overlap_x: int,
+    overlap_y: int,
+    grid_x: int,
+    grid_y: int,
+    tile_order: int,
+    detail_map: Optional[np.ndarray] = None,
+) -> Tuple[List[Dict[str, int]], List[List[str]]]:
+    boxes = _build_tile_boxes(image_width, image_height, grid_x, grid_y, overlap_x, overlap_y)
+
+    if tile_order == TILE_ORDER_DICT["spiral_outward"]:
+        ordered_indices = _spiral_order_indices(grid_x, grid_y, outward=True)
+    elif tile_order == TILE_ORDER_DICT["spiral_inward"]:
+        ordered_indices = _spiral_order_indices(grid_x, grid_y, outward=False)
+    elif tile_order == TILE_ORDER_DICT["serpentine"]:
+        ordered_indices = _serpentine_order_indices(grid_x, grid_y)
+    elif tile_order == TILE_ORDER_DICT["content_aware"] and detail_map is not None:
+        ordered_indices = _content_aware_order_indices(boxes, detail_map)
+    elif tile_order == TILE_ORDER_DICT["dependency_optimized"]:
+        ordered_indices = _dependency_optimized_order_indices(grid_x, grid_y)
+    else:
+        ordered_indices = list(range(len(boxes)))
+
+    ordered_boxes: List[Dict[str, int]] = []
+    for order_idx, box_idx in enumerate(ordered_indices):
+        box = dict(boxes[box_idx])
+        proc_w, proc_h = _fit_long_side(box["w"], box["h"], tile_resolution)
+        box["order"] = int(order_idx)
+        box["source_index"] = int(box_idx)
+        box["process_w"] = int(proc_w)
+        box["process_h"] = int(proc_h)
+        ordered_boxes.append(box)
+
+    matrix = _tile_display_matrix(boxes, ordered_indices, grid_x, grid_y)
+    return ordered_boxes, matrix
+
+
+def _image_to_samples(image: torch.Tensor) -> torch.Tensor:
+    return image.movedim(-1, 1)
+
+
+def _samples_to_image(samples: torch.Tensor) -> torch.Tensor:
+    return samples.movedim(1, -1)
+
+
+def resize_image_tensor(
+    image: torch.Tensor,
+    width: int,
+    height: int,
+    scaling_method: str = "lanczos",
+) -> torch.Tensor:
+    samples = _image_to_samples(image)
+    resized = comfy.utils.common_upscale(samples, width, height, scaling_method, crop=0)
+    return _samples_to_image(resized)
+
+
+def make_mask_for_box(
+    box: Dict[str, int],
+    canvas_w: int,
+    canvas_h: int,
+    feather_size: int,
+    blur_scale: float,
+    blending_method: str,
+) -> np.ndarray:
+    tile_w = int(box["w"])
+    tile_h = int(box["h"])
+    base_x = int(box["base_x"])
+    base_y = int(box["base_y"])
+    base_w = int(box["base_w"])
+    base_h = int(box["base_h"])
+    x = int(box["x"])
+    y = int(box["y"])
+
+    left_soft = max(0, base_x - x)
+    top_soft = max(0, base_y - y)
+    right_soft = max(0, (x + tile_w) - (base_x + base_w))
+    bottom_soft = max(0, (y + tile_h) - (base_y + base_h))
+
+    feather_size = max(0, int(feather_size))
+    left_feather = left_soft if feather_size == 0 else min(left_soft, feather_size)
+    right_feather = right_soft if feather_size == 0 else min(right_soft, feather_size)
+    top_feather = top_soft if feather_size == 0 else min(top_soft, feather_size)
+    bottom_feather = bottom_soft if feather_size == 0 else min(bottom_soft, feather_size)
+
+    yy, xx = np.mgrid[0:tile_h, 0:tile_w]
+    mask = np.ones((tile_h, tile_w), dtype=np.float32)
+
+    if left_feather > 0:
+        ramp = np.clip(xx / float(max(1, left_feather)), 0.0, 1.0)
+        mask *= ramp
+    if right_feather > 0:
+        dist = (tile_w - 1) - xx
+        ramp = np.clip(dist / float(max(1, right_feather)), 0.0, 1.0)
+        mask *= ramp
+    if top_feather > 0:
+        ramp = np.clip(yy / float(max(1, top_feather)), 0.0, 1.0)
+        mask *= ramp
+    if bottom_feather > 0:
+        dist = (tile_h - 1) - yy
+        ramp = np.clip(dist / float(max(1, bottom_feather)), 0.0, 1.0)
+        mask *= ramp
+
+    if blending_method == "advanced_feather":
+        mask = np.power(mask, 0.75)
+    elif blending_method == "distance_field":
+        mask = np.sqrt(np.clip(mask, 0.0, 1.0))
+    elif blending_method == "multi_scale":
+        mask = np.power(mask, 1.25)
+    elif blending_method == "frequency_domain":
+        mask = np.power(mask, 0.90)
+
+    total_soft_x = left_feather + right_feather
+    total_soft_y = top_feather + bottom_feather
+    blur_radius = calculate_enhanced_blur_radius(total_soft_x, total_soft_y, blur_scale)
+    if blur_radius > 0 and (total_soft_x > 0 or total_soft_y > 0):
+        pil_mask = Image.fromarray(np.clip(mask * 255.0, 0, 255).astype(np.uint8), mode="L")
+        if blending_method == "multi_scale":
+            pil_mask = pil_mask.filter(ImageFilter.GaussianBlur(radius=max(1, blur_radius // 2)))
+            pil_mask = pil_mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        else:
+            pil_mask = pil_mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        mask = np.array(pil_mask, dtype=np.float32) / 255.0
+
+    bx1 = max(0, base_x - x)
+    by1 = max(0, base_y - y)
+    bx2 = min(tile_w, bx1 + base_w)
+    by2 = min(tile_h, by1 + base_h)
+    if bx2 > bx1 and by2 > by1:
+        mask[by1:by2, bx1:bx2] = 1.0
+
+    return np.clip(mask, 0.0, 1.0)
+
+
+def _normalize_tiles_input(tiles: Union[List[torch.Tensor], torch.Tensor]) -> List[torch.Tensor]:
+    if isinstance(tiles, list):
+        return tiles
+    if torch.is_tensor(tiles):
+        if tiles.ndim == 4:
+            return [tiles[i : i + 1] for i in range(tiles.shape[0])]
+        if tiles.ndim == 3:
+            return [tiles.unsqueeze(0)]
+    raise ValueError("Unsupported tile input format for Egregora Combine.")
+
 
 class Egregora_Algorithm:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required": {
                 "image": ("IMAGE",),
-                "tile_width": ("INT", {"default": 1024, "min": 64, "max": 4096, "step": 64}),
-                "tile_height": ("INT", {"default": 1024, "min": 64, "max": 4096, "step": 64}),
+                "tile_resolution": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 64}),
                 "min_overlap": (list(OVERLAP_DICT.keys()), {"default": "1/8 Tile"}),
-                "min_scale_factor": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 8.0, "step": 0.1}),
+                "min_scale_factor": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 16.0, "step": 0.1}),
                 "tile_order": (list(TILE_ORDER_DICT.keys()), {"default": "linear"}),
                 "scaling_method": (SCALING_METHODS, {"default": "lanczos"}),
             },
@@ -252,94 +465,111 @@ class Egregora_Algorithm:
     FUNCTION = "execute"
     CATEGORY = "Egregora/Core"
 
-    def _calc_grid(self, W, H, tw, th, ox, oy, min_sf):
-        import math
-        # Overlap-flexible, minimal-tiles strategy:
-        # - Never increase overlap above user request.
-        # - Compute the smallest grid that meets min scale.
-        # - Reduce overlap if needed to avoid extra tiles.
-        min_sf = max(min_sf, 1.0)
+    def execute(
+        self,
+        image: torch.Tensor,
+        tile_resolution: int,
+        min_overlap: str,
+        min_scale_factor: float,
+        tile_order: str,
+        scaling_method: str,
+    ):
+        _, height, width, _ = image.shape
 
-        target_w = int(math.ceil(W * min_sf))
-        target_h = int(math.ceil(H * min_sf))
+        min_scale_factor = max(1.0, float(min_scale_factor))
+        target_long_side = int(math.ceil(max(width, height) * min_scale_factor))
+        up_w, up_h = _fit_long_side(width, height, target_long_side)
 
-        # Grid counts: minimal number of tiles to cover target size
-        gx = max(1, int(math.ceil(target_w / tw)))
-        gy = max(1, int(math.ceil(target_h / th)))
+        overlap_fraction = OVERLAP_DICT.get(min_overlap, 0.125)
+        if overlap_fraction == -1:
+            overlap_fraction = calculate_adaptive_overlap_fraction(width, height, tile_resolution, target_long_side)
 
-        # If the user requested overlap (>0), keep it even if it requires more tiles.
-        # This prevents overlap collapsing to 0 (hard seams).
-        def max_overlap_for_grid(total, tile, grid):
-            if grid <= 1:
-                return 0
-            return (tile * grid - total) / float(grid - 1)
+        overlap_x = calculate_overlap(tile_resolution, overlap_fraction)
+        overlap_y = calculate_overlap(tile_resolution, overlap_fraction)
+        grid_x, grid_y = _compute_grid(up_w, up_h, tile_resolution)
 
-        if ox > 0:
-            while max_overlap_for_grid(target_w, tw, gx) < ox:
-                gx += 1
-        if oy > 0:
-            while max_overlap_for_grid(target_h, th, gy) < oy:
-                gy += 1
-
-        # Max overlap that still covers target size with this grid
-        if gx <= 1:
-            ox_eff = 0
-        else:
-            max_ox = max_overlap_for_grid(target_w, tw, gx)
-            ox_eff = int(math.floor(max_ox))
-            ox_eff = max(0, min(ox_eff, ox))
-
-        if gy <= 1:
-            oy_eff = 0
-        else:
-            max_oy = max_overlap_for_grid(target_h, th, gy)
-            oy_eff = int(math.floor(max_oy))
-            oy_eff = max(0, min(oy_eff, oy))
-
-        upW = int(tw * gx - ox_eff * (gx - 1))
-        upH = int(th * gy - oy_eff * (gy - 1))
-
-        # Safety clamps
-        upW = max(tw, upW)
-        upH = max(th, upH)
-        ox_eff = max(0, min(ox_eff, tw - 1))
-        oy_eff = max(0, min(oy_eff, th - 1))
-
-        return upW, upH, gx, gy, ox_eff, oy_eff
-
-    def execute(self, image, tile_width, tile_height, min_overlap, min_scale_factor,
-                tile_order, scaling_method):
-
-        import comfy
-        _, H, W, _ = image.shape
-        ov = OVERLAP_DICT.get(min_overlap, 0.125)
-        if ov == -1:
-            ov = calculate_adaptive_overlap_fraction(W, H, tile_width, tile_height)
-        ox = calculate_overlap(tile_width, ov)
-        oy = calculate_overlap(tile_height, ov)
-
-        upW, upH, gx, gy, ox, oy = self._calc_grid(W, H, tile_width, tile_height, ox, oy, min_scale_factor)
-
-        samples = image.movedim(-1, 1)
-        up = comfy.utils.common_upscale(samples, upW, upH, scaling_method, crop=0).movedim(1, -1)
+        up = resize_image_tensor(image, up_w, up_h, scaling_method)
 
         egregora_data = {
-            "upscaled_width": int(upW), "upscaled_height": int(upH),
-            "tile_width": int(tile_width), "tile_height": int(tile_height),
-            "overlap_x": int(ox), "overlap_y": int(oy),
-            "grid_x": int(gx), "grid_y": int(gy),
+            "version": 2,
+            "original_width": int(width),
+            "original_height": int(height),
+            "upscaled_width": int(up_w),
+            "upscaled_height": int(up_h),
+            "target_long_side": int(target_long_side),
+            "tile_resolution": int(tile_resolution),
+            "overlap_x": int(overlap_x),
+            "overlap_y": int(overlap_y),
+            "grid_x": int(grid_x),
+            "grid_y": int(grid_y),
             "tile_order": int(TILE_ORDER_DICT.get(tile_order, 0)),
+            "scaling_method": scaling_method,
         }
 
-        ui = (f"Egregora Algorithm\n"
-              f"Original: {W}x{H}  Upscaled: {upW}x{upH}\n"
-              f"Grid: {gx}x{gy}  Tile: {tile_width}x{tile_height}  Overlap: {ox}x{oy}\n"
-              f"Order: {tile_order}")
-        return (up, egregora_data, ui)
+        ordered_boxes, matrix = build_ordered_tile_plan(
+            image_width=up_w,
+            image_height=up_h,
+            tile_resolution=tile_resolution,
+            overlap_x=overlap_x,
+            overlap_y=overlap_y,
+            grid_x=grid_x,
+            grid_y=grid_y,
+            tile_order=egregora_data["tile_order"],
+            detail_map=None,
+        )
+        egregora_data["tile_boxes"] = ordered_boxes
+        egregora_data["tile_matrix"] = matrix
+
+        ui = (
+            "Egregora Algorithm\n"
+            f"Original: {width}x{height} Upscaled: {up_w}x{up_h}\n"
+            f"Grid: {grid_x}x{grid_y} Tile Resolution: {tile_resolution} Overlap: {overlap_x}x{overlap_y}\n"
+            f"Order: {tile_order}"
+        )
+        return up, egregora_data, ui
+
+
+class Egregora_Analyze_Content:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "egregora_data": ("EGREGORA_DATA",),
+            },
+        }
+
+    RETURN_TYPES = ("EGREGORA_DATA", "STRING")
+    RETURN_NAMES = ("egregora_data", "ui")
+    FUNCTION = "execute"
+    CATEGORY = "Egregora/Core"
+
+    def execute(self, image: torch.Tensor, egregora_data: Dict):
+        detail_map = ContentAnalyzer.calculate_detail_map(image)
+        updated = dict(egregora_data)
+        updated["detail_map"] = detail_map
+
+        ordered_boxes, matrix = build_ordered_tile_plan(
+            image_width=updated["upscaled_width"],
+            image_height=updated["upscaled_height"],
+            tile_resolution=updated["tile_resolution"],
+            overlap_x=updated["overlap_x"],
+            overlap_y=updated["overlap_y"],
+            grid_x=updated["grid_x"],
+            grid_y=updated["grid_y"],
+            tile_order=TILE_ORDER_DICT["content_aware"],
+            detail_map=detail_map,
+        )
+        updated["tile_order"] = TILE_ORDER_DICT["content_aware"]
+        updated["tile_boxes"] = ordered_boxes
+        updated["tile_matrix"] = matrix
+
+        return updated, "Egregora content analysis completed. Tile order updated to content-aware."
+
 
 class Egregora_Divide_Select:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required": {
                 "image": ("IMAGE",),
@@ -354,521 +584,248 @@ class Egregora_Divide_Select:
     FUNCTION = "execute"
     CATEGORY = "Egregora/Core"
 
-    def execute(self, image, egregora_data, tile):
+    def execute(self, image: torch.Tensor, egregora_data: Dict, tile: int):
         image_height = image.shape[1]
         image_width = image.shape[2]
+        scaling_method = egregora_data.get("scaling_method", "lanczos")
 
-        tile_width = egregora_data['tile_width']
-        tile_height = egregora_data['tile_height']
-        overlap_x = egregora_data['overlap_x']
-        overlap_y = egregora_data['overlap_y']
-        grid_x = egregora_data['grid_x']
-        grid_y = egregora_data['grid_y']
-        tile_order = egregora_data['tile_order']
-        detail_map = egregora_data.get('detail_map')
+        ordered_boxes = egregora_data.get("tile_boxes")
+        if not ordered_boxes:
+            ordered_boxes, matrix = build_ordered_tile_plan(
+                image_width=image_width,
+                image_height=image_height,
+                tile_resolution=egregora_data["tile_resolution"],
+                overlap_x=egregora_data["overlap_x"],
+                overlap_y=egregora_data["overlap_y"],
+                grid_x=egregora_data["grid_x"],
+                grid_y=egregora_data["grid_y"],
+                tile_order=egregora_data["tile_order"],
+                detail_map=egregora_data.get("detail_map"),
+            )
+            egregora_data["tile_boxes"] = ordered_boxes
+            egregora_data["tile_matrix"] = matrix
 
-        tile_coordinates, matrix = create_enhanced_tile_coordinates(
-            image_width, image_height, tile_width, tile_height, 
-            overlap_x, overlap_y, grid_x, grid_y, tile_order, detail_map
-        )
+        tile_tensors: List[torch.Tensor] = []
+        for box in ordered_boxes:
+            x = _clamp_int(box["x"], 0, image_width - 1)
+            y = _clamp_int(box["y"], 0, image_height - 1)
+            w = _clamp_int(box["w"], 1, image_width - x)
+            h = _clamp_int(box["h"], 1, image_height - y)
 
-        image_tiles = []
-        for tile_coord in tile_coordinates:
-            x, y = tile_coord
-            
-            x = max(0, min(x, image_width - tile_width))
-            y = max(0, min(y, image_height - tile_height))
-            
-            image_tile = image[
-                :,
-                y : y + tile_height,
-                x : x + tile_width,
-                :,
-            ]
-            image_tiles.append(image_tile)
+            tile_image = image[:, y : y + h, x : x + w, :]
+            proc_w = int(box["process_w"])
+            proc_h = int(box["process_h"])
+            if proc_w != w or proc_h != h:
+                tile_image = resize_image_tensor(tile_image, proc_w, proc_h, scaling_method)
+            tile_tensors.append(tile_image)
 
-        if not image_tiles:
-            return ([torch.zeros((1, tile_height, tile_width, 3))], "No tiles generated")
+        if not tile_tensors:
+            fallback = torch.zeros((1, 64, 64, 3), dtype=image.dtype, device=image.device)
+            return [fallback], "No tiles generated"
 
-        all_tiles = torch.cat(image_tiles, dim=0)
+        matrix = egregora_data.get("tile_matrix")
+        if matrix is None:
+            matrix = _tile_display_matrix(
+                boxes=[dict(box) for box in ordered_boxes],
+                ordered_indices=list(range(len(ordered_boxes))),
+                grid_x=egregora_data["grid_x"],
+                grid_y=egregora_data["grid_y"],
+            )
 
         if tile == 0:
-            tile_or_tiles = all_tiles
+            output_tiles = tile_tensors
         else:
-            if tile <= len(image_tiles):
-                tile_or_tiles = image_tiles[tile - 1]
-            else:
-                tile_or_tiles = image_tiles[0]
+            index = max(0, min(tile - 1, len(tile_tensors) - 1))
+            output_tiles = [tile_tensors[index]]
 
-        matrix_ui = "Egregora Tile Matrix:\n" + '\n'.join([' '.join(row) for row in matrix])
-
-        return ([tile_or_tiles[i].unsqueeze(0) for i in range(tile_or_tiles.shape[0])], matrix_ui)
-
-import math, torch, numpy as np
-from PIL import Image, ImageDraw, ImageFilter
-
-import math
-import torch
-import numpy as np
-from typing import List, Tuple
+        matrix_ui = "Egregora Tile Matrix:\n" + "\n".join(" ".join(row) for row in matrix)
+        return output_tiles, matrix_ui
 
 
 class Egregora_Combine:
-    """
-    Egregora-order + DaC-style alpha-over with controllable edge-feather transparency.
-
-    - Coordinates: uses create_enhanced_tile_coordinates (same as Divide & Select),
-      so order/positions match exactly.
-    - Per-tile analytic feather mask that goes to 0 (transparent) right at
-      tile borders, rising to 1 (opaque) over "feather_size" pixels.
-      Feather is applied ONLY on internal sides (not on outer canvas edges),
-      and clamped to the tile overlap so it cannot create holes.
-    - Compositing: ORDER-DEPENDENT alpha-over (no global normalization), like DaC.
-    """
-
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "images": ("IMAGE",),
-                "egregora_data": ("EGREGORA_DATA",),
-            },
-            "optional": {
-                "feather_size": ("INT", {"default": 16, "min": 0, "max": 2048, "step": 1}),
-                "blend_mode": (["normalized", "alpha_over"], {"default": "normalized"}),
-                "feather_curve": (["smoothstep", "linear", "cosine"], {"default": "smoothstep"}),
-                "feather_mode": (["overlap", "custom"], {"default": "overlap"}),
-            },
-        }
-
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("image", "ui")
-    INPUT_IS_LIST = True
-    FUNCTION = "execute"
-    CATEGORY = "Egregora/Core"
-
-    # ---- coordinate helper: call Egregora's own generator ----
-    def _coords_egregora(self, W, H, tw, th, ox, oy, gx, gy, order, detail_map=None):
-        coords, _ = create_enhanced_tile_coordinates(
-            W, H, tw, th, ox, oy, gx, gy, order, detail_map
-        )
-        return coords
-
-    @staticmethod
-    def _to_int_scalar(value, default=16):
-        """Unwrap lists/tuples/tensors and cast to int safely."""
-        import torch
-        v = value
-        if isinstance(v, (list, tuple)):
-            v = v[0] if len(v) else default
-        if isinstance(v, torch.Tensor):
-            v = v.detach().cpu().flatten().tolist()
-            v = v[0] if len(v) else default
-        try:
-            v = int(float(v))
-        except Exception:
-            v = default
-        return v
-
-    @staticmethod
-    def _build_feather_mask(H, W, device, dtype,
-                            xs, ys, up_w, up_h,
-                            feather_size, overlap_x, overlap_y,
-                            feather_curve="smoothstep"):
-        """
-        Analytic feather mask that is 0 at the ROI edges and rises linearly to 1
-        over 'feather_size' pixels, ONLY on sides that don't touch the canvas border.
-        The feather per-axis is clamped to the corresponding overlap to prevent gaps.
-        """
-        fx = max(0, min(int(feather_size), max(0, W - 1)))
-        fy = max(0, min(int(feather_size), max(0, H - 1)))
-
-        at_left   = (xs == 0)
-        at_top    = (ys == 0)
-        at_right  = (xs + W == up_w)
-        at_bottom = (ys + H == up_h)
-
-        fl = 0 if at_left   else fx
-        fr = 0 if at_right  else fx
-        ft = 0 if at_top    else fy
-        fb = 0 if at_bottom else fy
-
-        y = torch.arange(H, device=device, dtype=dtype)[:, None]  # (H,1)
-        x = torch.arange(W, device=device, dtype=dtype)[None, :]  # (1,W)
-
-        dist_left   = x
-        dist_right  = (W - 1) - x
-        dist_top    = y
-        dist_bottom = (H - 1) - y
-
-        one = torch.ones((H, W), device=device, dtype=dtype)
-
-        def ramp(dist, f):
-            if f <= 0:
-                return one
-            t = torch.clamp(dist / float(f), 0.0, 1.0)
-            return t * t * (3.0 - 2.0 * t)
-
-        mask_left   = ramp(dist_left,   fl)
-        mask_right  = ramp(dist_right,  fr)
-        mask_top    = ramp(dist_top,    ft)
-        mask_bottom = ramp(dist_bottom, fb)
-
-        # Multiplicative mask produces a smooth 2D falloff without ridges.
-        mask2d = (mask_left * mask_right) * (mask_top * mask_bottom)
-        return mask2d.unsqueeze(0).unsqueeze(-1)  # (1,H,W,1)
-
-    def execute(self, images, egregora_data, feather_size=16, blend_mode="normalized", feather_curve="smoothstep", feather_mode="overlap"):
-        # Flatten tiles preserving order
-        flat = []
-        for itm in images:
-            if isinstance(itm, (list, tuple)):
-                flat.extend(itm)
-            else:
-                flat.append(itm)
-        tiles = torch.cat([t if t.dim() == 4 else t.unsqueeze(0) for t in flat], dim=0)
-
-        # egregora_data may arrive wrapped (because INPUT_IS_LIST=True)
-        if isinstance(egregora_data, (list, tuple)):
-            egregora_data = egregora_data[0] if len(egregora_data) else {}
-
-        # NEW: unwrap feather_size safely (it may arrive as [16] or a tensor)
-        feather_size = self._to_int_scalar(feather_size, default=16)
-        if feather_size < 0:
-            feather_size = 0
-
-        # Geometry from the algorithm node
-        up_w = int(egregora_data["upscaled_width"])
-        up_h = int(egregora_data["upscaled_height"])
-        tw   = int(egregora_data["tile_width"])
-        th   = int(egregora_data["tile_height"])
-        ox   = int(egregora_data["overlap_x"])
-        oy   = int(egregora_data["overlap_y"])
-        gx   = int(egregora_data["grid_x"])
-        gy   = int(egregora_data["grid_y"])
-        order = int(egregora_data.get("tile_order", 0))
-        detail_map = egregora_data.get("detail_map", None)
-
-        # For normalized blending, use full overlap fade by default.
-        # For alpha_over, clamp to avoid gaps.
-        if feather_mode == "overlap":
-            feather_size = max(0, min(ox, oy))
-        if blend_mode == "alpha_over":
-            max_feather = max(0, min(ox, oy) // 2)
-            feather_size = min(feather_size, max_feather)
-
-        # Coordinates using same generator/order as Divide & Select
-        coords = self._coords_egregora(up_w, up_h, tw, th, ox, oy, gx, gy, order, detail_map)
-
-        # Canvas
-        device, dtype = tiles.device, tiles.dtype
-        canvas = torch.zeros((1, up_h, up_w, 3), dtype=dtype, device=device)
-        weight_sum = None
-        if blend_mode == "normalized":
-            weight_sum = torch.zeros((1, up_h, up_w, 1), dtype=dtype, device=device)
-
-        # Composite in that same order
-        T = tiles.shape[0]
-        for i, (x, y) in enumerate(coords):
-            if i >= T:
-                break
-
-            tile = tiles[i].squeeze(0).clamp(0, 1)  # (H,W,3)
-            H, W = int(tile.shape[0]), int(tile.shape[1])
-
-            xs = max(0, int(x)); ys = max(0, int(y))
-            xe = min(xs + W, up_w); ye = min(ys + H, up_h)
-            if xe <= xs or ye <= ys:
-                continue
-            Wroi, Hroi = (xe - xs), (ye - ys)
-
-            tile_roi = tile[:Hroi, :Wroi, :]
-
-            mask = self._build_feather_mask(
-                H=Hroi, W=Wroi, device=device, dtype=dtype,
-                xs=xs, ys=ys, up_w=up_w, up_h=up_h,
-                feather_size=feather_size, overlap_x=ox, overlap_y=oy
-            )  # (1,Hroi,Wroi,1)
-
-            if blend_mode == "normalized":
-                roi = canvas[:, ys:ye, xs:xe, :]
-                wroi = weight_sum[:, ys:ye, xs:xe, :]
-                canvas[:, ys:ye, xs:xe, :] = roi + tile_roi.unsqueeze(0) * mask
-                weight_sum[:, ys:ye, xs:xe, :] = wroi + mask
-            else:
-                roi = canvas[:, ys:ye, xs:xe, :]
-                canvas[:, ys:ye, xs:xe, :] = roi * (1.0 - mask) + tile_roi.unsqueeze(0) * mask
-
-        eff_fx = max(0, min(int(feather_size), ox))
-        eff_fy = max(0, min(int(feather_size), oy))
-        if blend_mode == "normalized":
-            denom = torch.clamp(weight_sum, min=1e-6)
-            canvas = canvas / denom
-
-        ui = (f"Egregora Combine ({blend_mode}, {feather_curve})\n"
-              f"Canvas: {up_w}x{up_h}  Grid: {gx}x{gy} ({gx*gy} tiles)\n"
-              f"Overlap: {ox}x{oy}  Order: {order}\n"
-              f"Feather: effective={eff_fx}x{eff_fy}px\n"
-              f"(internal sides only; clamped to overlap)")
-        return (canvas.clamp(0, 1), ui)
-
-
-class Egregora_Preview:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "egregora_data": ("EGREGORA_DATA",),
-                "show_grid": ("BOOLEAN", {"default": True}),
-                "show_overlap": ("BOOLEAN", {"default": True}),
-                "show_order": ("BOOLEAN", {"default": True}),
-            },
-            "optional": {
-                "feather_size": ("INT", {"default": 32, "min": 0, "max": 2048, "step": 1}),
-            }
-        }
-
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("preview", "ui")
-    FUNCTION = "execute"
-    CATEGORY = "Egregora/Utils"
-    DESCRIPTION = "Preview the tiling strategy with visual indicators for debugging seam issues."
-
-    def execute(self, image, egregora_data, show_grid, show_overlap, show_order, feather_size=32):
-        _, height, width, _ = image.shape
-        
-        tile_width = egregora_data['tile_width']
-        tile_height = egregora_data['tile_height']
-        overlap_x = egregora_data['overlap_x']
-        overlap_y = egregora_data['overlap_y']
-        grid_x = egregora_data['grid_x']
-        grid_y = egregora_data['grid_y']
-        tile_order = egregora_data['tile_order']
-        detail_map = egregora_data.get('detail_map')
-
-        tile_coordinates, matrix = create_enhanced_tile_coordinates(
-            width, height, tile_width, tile_height,
-            overlap_x, overlap_y, grid_x, grid_y, tile_order, detail_map
-        )
-
-        preview = image.clone()
-        preview_np = (preview.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
-        preview_pil = Image.fromarray(preview_np)
-        draw = ImageDraw.Draw(preview_pil, 'RGBA')
-
-        # Enhanced colors for better visibility
-        grid_color = (255, 0, 0, 180)      # Bright red for tile boundaries
-        overlap_color = (0, 255, 0, 100)   # Semi-transparent green for overlaps
-        order_color = (255, 255, 0, 255)   # Bright yellow for numbers
-        feather_color = (0, 0, 255, 80)    # Blue for feather zones
-
-        if isinstance(feather_size, (list, tuple)):
-            feather_size = feather_size[0] if len(feather_size) else 32
-        try:
-            feather_size = int(feather_size)
-        except Exception:
-            feather_size = 32
-
-        for idx, (x, y) in enumerate(tile_coordinates):
-            if show_grid:
-                # Draw tile boundary with thicker lines
-                draw.rectangle([x, y, x + tile_width - 1, y + tile_height - 1], 
-                             outline=grid_color[:3], width=3)
-
-            if show_overlap:
-                # Draw overlap regions
-                if overlap_x > 0 and x > 0:
-                    draw.rectangle([x, y, x + overlap_x, y + tile_height], 
-                                 fill=overlap_color)
-                if overlap_y > 0 and y > 0:
-                    draw.rectangle([x, y, x + tile_width, y + overlap_y], 
-                                 fill=overlap_color)
-                
-                # Draw feather zones (larger than overlap)
-                feather_x = max(overlap_x, feather_size)
-                feather_y = max(overlap_y, feather_size)
-                
-                if feather_x > overlap_x and x > 0:
-                    draw.rectangle([x + overlap_x, y, x + feather_x, y + tile_height], 
-                                 fill=feather_color)
-                if feather_y > overlap_y and y > 0:
-                    draw.rectangle([x, y + overlap_y, x + tile_width, y + feather_y], 
-                                 fill=feather_color)
-
-            if show_order:
-                # Draw processing order numbers with background
-                text_x = x + tile_width // 2
-                text_y = y + tile_height // 2
-                
-                # Draw background circle for better visibility
-                draw.ellipse([text_x-20, text_y-20, text_x+20, text_y+20], 
-                           fill=(0, 0, 0, 180))
-                draw.text((text_x, text_y), str(idx + 1), fill=order_color[:3], anchor="mm")
-
-        # Convert back to tensor
-        preview_np = np.array(preview_pil).astype(np.float32) / 255.0
-        preview_tensor = torch.tensor(preview_np).unsqueeze(0)
-
-        # Enhanced UI info with debugging details
-        blur_radius = calculate_enhanced_blur_radius(overlap_x, overlap_y, egregora_data.get('blur_scale', 0.5))
-        
-        ui_info = f"""Egregora Tiling Preview (FIXED):
-Tiles: {len(tile_coordinates)}
-Grid: {grid_x}x{grid_y}
-Tile Size: {tile_width}x{tile_height}
-Overlap: {overlap_x}x{overlap_y}
-Feather: {feather_size}px
-Blur Radius: {blur_radius}px (FIXED calculation)
-Order: {list(TILE_ORDER_DICT.keys())[tile_order]}
-Blending: {egregora_data.get('blending_method', 'advanced_feather')}
-
-Legend:
-- Red lines: Tile boundaries
-- Green areas: Overlap zones
-- Blue areas: Extended feather zones
-- Yellow numbers: Processing order"""
-
-        return (preview_tensor, ui_info)
-
-class Egregora_Analyze_Content:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-            }
-        }
-
-    RETURN_TYPES = ("IMAGE", "STRING", "EGREGORA_ANALYSIS")
-    RETURN_NAMES = ("detail_map", "ui", "analysis_data")
-    FUNCTION = "execute"
-    CATEGORY = "Egregora/Utils"
-
-    def execute(self, image):
-        detail_map = ContentAnalyzer.calculate_detail_map(image)
-        
-        detail_map_norm = (detail_map - detail_map.min()) / (detail_map.max() - detail_map.min() + 1e-8)
-        detail_map_rgb = np.stack([detail_map_norm] * 3, axis=2)
-        detail_map_tensor = torch.tensor(detail_map_rgb).unsqueeze(0).float()
-        
-        mean_detail = np.mean(detail_map)
-        std_detail = np.std(detail_map)
-        max_detail = np.max(detail_map)
-        min_detail = np.min(detail_map)
-        
-        threshold = mean_detail + std_detail
-        high_detail_pixels = np.sum(detail_map > threshold)
-        total_pixels = detail_map.shape[0] * detail_map.shape[1]
-        high_detail_percentage = (high_detail_pixels / total_pixels) * 100
-        
-        analysis_data = {
-            'detail_map': detail_map,
-            'mean_detail': mean_detail,
-            'std_detail': std_detail,
-            'max_detail': max_detail,
-            'min_detail': min_detail,
-            'high_detail_threshold': threshold,
-            'high_detail_percentage': high_detail_percentage
-        }
-        
-        ui_info = f"""Egregora Content Analysis:
-Mean Detail: {mean_detail:.4f}
-Std Detail: {std_detail:.4f}
-Max Detail: {max_detail:.4f}
-Min Detail: {min_detail:.4f}
-High Detail Regions: {high_detail_percentage:.1f}%
-
-Blending Recommendations:
-- Blur Scale: {min(1.0, high_detail_percentage / 50.0):.2f} (higher for complex images)
-- Feather Size: {max(32, int(high_detail_percentage * 2))}px
-- Method: {'advanced_feather' if high_detail_percentage > 25 else 'distance_field'}
-- Overlap: {'Increase to 1/4 tile' if high_detail_percentage > 40 else 'Current is fine'}"""
-
-        return (detail_map_tensor, ui_info, analysis_data)
-
-class Egregora_Turbo_Prompt:
-    """Minimal turbo prompt for conditioning"""
-
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "clip": ("CLIP",),
-                "caption_text": ("STRING", {"multiline": True, "forceInput": True}),
-                "global_positive_prompt": ("STRING", {"multiline": True, "default": ""}),
-                "global_negative_prompt": ("STRING", {"multiline": True, "default": ""}),
-                "blacklist_words": ("STRING", {"multiline": True, "default": "", "placeholder": "blacklist_words"}),
-            }
+                "tiles": ("IMAGE",),
+                "egregora_data": ("EGREGORA_DATA",),
+                # Fração do overlap usada para feather por lado.
+                # 0.5 = usa metade do overlap em cada borda (máximo recomendado).
+                # 0.1 = zona de feather pequena, transição mais abrupta.
+                "feather_ratio": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 0.5, "step": 0.01}),
+                "scaling_method": (SCALING_METHODS, {"default": "lanczos"}),
+            },
         }
 
-    RETURN_TYPES = ("CONDITIONING", "CONDITIONING")
-    RETURN_NAMES = ("positive_conditioning", "negative_conditioning")
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("IMAGE", "ui")
     FUNCTION = "execute"
-    CATEGORY = "Egregora/Conditioning"
+    CATEGORY = "Egregora/Core"
+    INPUT_IS_LIST = True
 
-    def _normalize(self, s: str) -> str:
-        s = (s or "").strip()
-        return re.sub(r"\s+", " ", s)
+    @staticmethod
+    def _unwrap_scalar(value):
+        if isinstance(value, list):
+            return value[0] if value else None
+        return value
 
-    def _parse_blacklist(self, text: str):
-        if not text:
-            return []
-        items = [t.strip() for t in re.split(r"[,\n]+", text) if t.strip()]
-        seen, out = set(), []
-        for w in items:
-            lw = w.lower()
-            if lw not in seen:
-                seen.add(lw)
-                out.append(re.escape(w))
-        return out
+    @staticmethod
+    def _normalize_tiles(tiles):
+        out = []
+        if isinstance(tiles, torch.Tensor):
+            if tiles.ndim == 4:
+                for i in range(tiles.shape[0]):
+                    out.append(tiles[i:i+1])
+            elif tiles.ndim == 3:
+                out.append(tiles.unsqueeze(0))
+            else:
+                raise ValueError(f"Unsupported tiles tensor rank: {tiles.ndim}")
+            return out
+        if isinstance(tiles, (list, tuple)):
+            for t in tiles:
+                if isinstance(t, torch.Tensor):
+                    if t.ndim == 4:
+                        for i in range(t.shape[0]):
+                            out.append(t[i:i+1])
+                    elif t.ndim == 3:
+                        out.append(t.unsqueeze(0))
+                    else:
+                        raise ValueError(f"Unsupported tile rank: {t.ndim}")
+                else:
+                    raise ValueError(f"Unsupported tile type: {type(t)}")
+            return out
+        raise ValueError(f"Unsupported tiles input type: {type(tiles)}")
 
-    def _apply_blacklist(self, text: str, terms):
-        if not text or not terms:
-            return self._normalize(text)
-        pattern = r"\b(?:{})\b".format("|".join(terms))
-        cleaned = re.sub(pattern, " ", text, flags=re.IGNORECASE)
-        return self._normalize(cleaned)
+    @staticmethod
+    def _build_mask(box, canvas_w, canvas_h, feather_ratio, device):
+        w = int(box["w"])
+        h = int(box["h"])
+        x = int(box["x"])
+        y = int(box["y"])
+        base_x = int(box.get("base_x", x))
+        base_y = int(box.get("base_y", y))
+        base_w = int(box.get("base_w", w))
+        base_h = int(box.get("base_h", h))
 
-    def _encode(self, clip, text: str):
-        tokens = clip.tokenize(text)
-        try:
-            out = clip.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
-            cond = out.pop("cond")
-            return [[cond, out]]
-        except TypeError:
-            cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
-            return [[cond, {"pooled_output": pooled}]]
+        left_soft   = max(0, base_x - x)
+        right_soft  = max(0, (x + w) - (base_x + base_w))
+        top_soft    = max(0, base_y - y)
+        bottom_soft = max(0, (y + h) - (base_y + base_h))
 
-    def execute(self, clip, caption_text, global_positive_prompt, global_negative_prompt, blacklist_words):
-        pos_text = self._normalize(f"{caption_text} {global_positive_prompt}".strip())
-        terms = self._parse_blacklist(blacklist_words)
-        pos_text = self._apply_blacklist(pos_text, terms)
+        feather_w_l = int(left_soft   * feather_ratio)
+        feather_w_r = int(right_soft  * feather_ratio)
+        feather_h_t = int(top_soft    * feather_ratio)
+        feather_h_b = int(bottom_soft * feather_ratio)
 
-        neg_text = self._normalize(global_negative_prompt)
+        mask = torch.ones((h, w), dtype=torch.float32, device=device)
 
-        positive = self._encode(clip, pos_text if pos_text else " ")
-        negative = self._encode(clip, neg_text if neg_text else " ")
+        if x > 0 and feather_w_l > 0:
+            grad = torch.linspace(0.0, 1.0, feather_w_l, device=device)
+            mask[:, :feather_w_l] *= grad.unsqueeze(0)
 
-        return (positive, negative)
+        if (x + w) < canvas_w and feather_w_r > 0:
+            grad = torch.linspace(1.0, 0.0, feather_w_r, device=device)
+            mask[:, w - feather_w_r:] *= grad.unsqueeze(0)
 
-# Node registration
+        if y > 0 and feather_h_t > 0:
+            grad = torch.linspace(0.0, 1.0, feather_h_t, device=device)
+            mask[:feather_h_t, :] *= grad.unsqueeze(1)
+
+        if (y + h) < canvas_h and feather_h_b > 0:
+            grad = torch.linspace(1.0, 0.0, feather_h_b, device=device)
+            mask[h - feather_h_b:, :] *= grad.unsqueeze(1)
+
+        return mask
+
+    def execute(self, tiles, egregora_data, feather_ratio, scaling_method):
+        tile_list      = self._normalize_tiles(tiles)
+        egregora_data  = self._unwrap_scalar(egregora_data)
+        feather_ratio  = float(self._unwrap_scalar(feather_ratio))
+        scaling_method = self._unwrap_scalar(scaling_method)
+
+        if egregora_data is None:
+            raise ValueError("Egregora Combine requires egregora_data.")
+
+        ordered_boxes = egregora_data.get("tile_boxes", [])
+        if not ordered_boxes:
+            raise ValueError("Egregora Combine requires tile_boxes in egregora_data.")
+
+        canvas_w  = int(egregora_data["upscaled_width"])
+        canvas_h  = int(egregora_data["upscaled_height"])
+        use_count = min(len(tile_list), len(ordered_boxes))
+
+        if use_count == 0:
+            raise ValueError("No tiles available to combine.")
+
+        device = tile_list[0].device
+        dtype  = tile_list[0].dtype
+
+        output  = torch.zeros((1, canvas_h, canvas_w, 3), dtype=torch.float32, device=device)
+        weights = torch.zeros((1, canvas_h, canvas_w, 1), dtype=torch.float32, device=device)
+
+        for i in range(use_count):
+            tile_tensor = tile_list[i].to(dtype=torch.float32)
+            box         = ordered_boxes[i]
+
+            if tile_tensor.ndim == 3:
+                tile_tensor = tile_tensor.unsqueeze(0)
+            if tile_tensor.shape[0] != 1:
+                tile_tensor = tile_tensor[:1]
+
+            target_w = int(box["w"])
+            target_h = int(box["h"])
+
+            if tile_tensor.shape[2] != target_w or tile_tensor.shape[1] != target_h:
+                tile_tensor = resize_image_tensor(tile_tensor, target_w, target_h, scaling_method)
+
+            mask = self._build_mask(
+                box=box,
+                canvas_w=canvas_w,
+                canvas_h=canvas_h,
+                feather_ratio=feather_ratio,
+                device=device,
+            )
+
+            mask_4d = mask.unsqueeze(0).unsqueeze(-1)
+
+            x  = int(box["x"])
+            y  = int(box["y"])
+            x2 = x + target_w
+            y2 = y + target_h
+
+            output [:, y:y2, x:x2, :] += tile_tensor * mask_4d
+            weights[:, y:y2, x:x2, :] += mask_4d
+
+        weights[weights == 0] = 1.0
+        output = output / weights
+
+        final = torch.clamp(output, 0.0, 1.0).to(dtype=dtype)
+
+        overlap_x  = egregora_data.get("overlap_x", 0)
+        overlap_y  = egregora_data.get("overlap_y", 0)
+        feather_px = int((overlap_x // 2) * feather_ratio)
+
+        ui = (
+            "Egregora Combine\n"
+            f"Canvas: {canvas_w}x{canvas_h} | Tiles: {use_count}/{len(ordered_boxes)}\n"
+            f"Overlap: {overlap_x}x{overlap_y}px | "
+            f"Feather ratio: {feather_ratio} (~{feather_px}px/side)"
+        )
+
+        return final, ui
+
+
 NODE_CLASS_MAPPINGS = {
     "Egregora Algorithm": Egregora_Algorithm,
-    "Egregora Divide and Select": Egregora_Divide_Select,
-    "Egregora Combine": Egregora_Combine,
-    "Egregora Preview": Egregora_Preview,
     "Egregora Analyze Content": Egregora_Analyze_Content,
-    "Egregora Turbo Prompt": Egregora_Turbo_Prompt,
-
+    "Egregora Divide Select": Egregora_Divide_Select,
+    "Egregora Combine": Egregora_Combine,
 }
 
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "Egregora Algorithm": "🧠 Egregora Algorithm",
-    "Egregora Divide and Select": "✂️ Egregora Divide & Select",
-    "Egregora Combine": "🔗 Egregora Combine",
-    "Egregora Preview": "👁️ Egregora Preview",
-    "Egregora Analyze Content": "🔍 Egregora Content Analysis",
-    "Egregora Turbo Prompt": "🚀 Egregora Turbo Prompt",
 
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "Egregora Algorithm": "Egregora Algorithm",
+    "Egregora Analyze Content": "Egregora Analyze Content",
+    "Egregora Divide Select": "Egregora Divide Select",
+    "Egregora Combine": "Egregora Combine",
 }
