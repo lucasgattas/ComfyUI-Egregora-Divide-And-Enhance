@@ -619,8 +619,6 @@ class Egregora_Divide_Select:
         return [tile_tensors[index]], [mask_tensors[index]]
 
 
-
-
 class Egregora_Combine:
     @classmethod
     def INPUT_TYPES(cls):
@@ -630,6 +628,15 @@ class Egregora_Combine:
                 "masks": ("MASK",),
                 "egregora_data": ("EGREGORA_DATA",),
                 "scaling_method": (SCALING_METHODS, {"default": "lanczos"}),
+            },
+            "optional": {
+                "combine_mode": (["owner_alpha_over", "normalized"], {"default": "owner_alpha_over"}),
+                "dominance_gamma": ("FLOAT", {"default": 1.30, "min": 0.1, "max": 8.0, "step": 0.05}),
+                "conflict_boost": ("FLOAT", {"default": 0.90, "min": 0.0, "max": 8.0, "step": 0.05}),
+                "edge_boost": ("FLOAT", {"default": 0.75, "min": 0.0, "max": 8.0, "step": 0.05}),
+                "conflict_power": ("FLOAT", {"default": 1.00, "min": 0.1, "max": 8.0, "step": 0.05}),
+                "edge_power": ("FLOAT", {"default": 1.20, "min": 0.1, "max": 8.0, "step": 0.05}),
+                "transition_focus": ("FLOAT", {"default": 1.50, "min": 0.1, "max": 8.0, "step": 0.05}),
             },
         }
 
@@ -645,11 +652,187 @@ class Egregora_Combine:
             return value[0] if value else None
         return value
 
-    def execute(self, tiles, masks, egregora_data, scaling_method):
+    @staticmethod
+    def _unwrap_float(value, default):
+        if isinstance(value, list):
+            value = value[0] if value else default
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    @staticmethod
+    def _prepare_mask(mask_tensor, target_h, target_w, device):
+        if mask_tensor.ndim != 2:
+            raise ValueError("Each mask must be a 2D tensor.")
+
+        if mask_tensor.shape[0] != target_h or mask_tensor.shape[1] != target_w:
+            mask_tensor = torch.nn.functional.interpolate(
+                mask_tensor.unsqueeze(0).unsqueeze(0),
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0).squeeze(0)
+
+        return mask_tensor.to(device=device, dtype=torch.float32)
+
+    @staticmethod
+    def _rgb_to_luma(img):
+        # img: (1, H, W, 3)
+        return (
+            0.299 * img[..., 0] +
+            0.587 * img[..., 1] +
+            0.114 * img[..., 2]
+        )
+
+    @staticmethod
+    def _sobel_magnitude(gray):
+        # gray: (1, H, W)
+        # returns: (1, H, W)
+        import torch.nn.functional as F
+
+        kx = torch.tensor(
+            [[-1.0, 0.0, 1.0],
+             [-2.0, 0.0, 2.0],
+             [-1.0, 0.0, 1.0]],
+            device=gray.device,
+            dtype=gray.dtype,
+        ).view(1, 1, 3, 3)
+
+        ky = torch.tensor(
+            [[-1.0, -2.0, -1.0],
+             [ 0.0,  0.0,  0.0],
+             [ 1.0,  2.0,  1.0]],
+            device=gray.device,
+            dtype=gray.dtype,
+        ).view(1, 1, 3, 3)
+
+        x = gray.unsqueeze(1)  # (1, 1, H, W)
+        gx = F.conv2d(x, kx, padding=1)
+        gy = F.conv2d(x, ky, padding=1)
+        mag = torch.sqrt(gx * gx + gy * gy + 1e-8)
+        return mag.squeeze(1)
+
+    @staticmethod
+    def _build_transition_band(mask_tensor, transition_focus):
+        # mask_tensor: (H, W)
+        band = torch.clamp(4.0 * mask_tensor * (1.0 - mask_tensor), 0.0, 1.0)
+        if transition_focus != 1.0:
+            band = torch.pow(band, transition_focus)
+        return torch.clamp(band, 0.0, 1.0)
+
+    @staticmethod
+    def _normalize_local_map(x, eps=1e-6):
+        # x: (1, H, W)
+        x_max = torch.amax(x, dim=(1, 2), keepdim=True)
+        return torch.clamp(x / (x_max + eps), 0.0, 1.0)
+
+    def _build_local_gamma_map(
+        self,
+        base_mask_2d,
+        tile_tensor,
+        roi_tensor,
+        dominance_gamma,
+        conflict_boost,
+        edge_boost,
+        conflict_power,
+        edge_power,
+        transition_focus,
+    ):
+        # base_mask_2d: (H, W)
+        # tile_tensor, roi_tensor: (1, H, W, 3)
+
+        transition_band = self._build_transition_band(base_mask_2d, transition_focus).unsqueeze(0)  # (1,H,W)
+
+        # 1) Conflict map
+        diff_rgb = torch.mean(torch.abs(tile_tensor - roi_tensor), dim=-1)  # (1,H,W)
+        conflict_weighted = diff_rgb * transition_band
+        conflict_norm = self._normalize_local_map(conflict_weighted)
+        if conflict_power != 1.0:
+            conflict_norm = torch.pow(conflict_norm, conflict_power)
+        conflict_norm = torch.clamp(conflict_norm, 0.0, 1.0)
+
+        # 2) Edge map
+        tile_luma = self._rgb_to_luma(tile_tensor)  # (1,H,W)
+        roi_luma = self._rgb_to_luma(roi_tensor)    # (1,H,W)
+
+        grad_tile = self._sobel_magnitude(tile_luma)  # (1,H,W)
+        grad_roi = self._sobel_magnitude(roi_luma)    # (1,H,W)
+
+        edge_strength = torch.maximum(grad_tile, grad_roi)
+        edge_weighted = edge_strength * transition_band
+        edge_norm = self._normalize_local_map(edge_weighted)
+        if edge_power != 1.0:
+            edge_norm = torch.pow(edge_norm, edge_power)
+        edge_norm = torch.clamp(edge_norm, 0.0, 1.0)
+
+        # 3) Local gamma
+        local_gamma = (
+            dominance_gamma
+            + conflict_boost * conflict_norm * transition_band
+            + edge_boost * edge_norm * transition_band
+        )
+        local_gamma = torch.clamp(local_gamma, 0.1, 8.0)
+
+        return local_gamma
+
+    def _apply_adaptive_dominance(
+        self,
+        mask_tensor,
+        tile_tensor,
+        roi_tensor,
+        dominance_gamma,
+        conflict_boost,
+        edge_boost,
+        conflict_power,
+        edge_power,
+        transition_focus,
+    ):
+        mask_tensor = torch.clamp(mask_tensor, 0.0, 1.0)  # (H,W)
+
+        local_gamma = self._build_local_gamma_map(
+            base_mask_2d=mask_tensor,
+            tile_tensor=tile_tensor,
+            roi_tensor=roi_tensor,
+            dominance_gamma=dominance_gamma,
+            conflict_boost=conflict_boost,
+            edge_boost=edge_boost,
+            conflict_power=conflict_power,
+            edge_power=edge_power,
+            transition_focus=transition_focus,
+        )
+
+        mask_expanded = mask_tensor.unsqueeze(0)  # (1,H,W)
+        adapted_mask = torch.pow(mask_expanded, local_gamma)
+        return torch.clamp(adapted_mask.squeeze(0), 0.0, 1.0)
+
+    def execute(
+        self,
+        tiles,
+        masks,
+        egregora_data,
+        scaling_method,
+        combine_mode="owner_alpha_over",
+        dominance_gamma=1.30,
+        conflict_boost=0.90,
+        edge_boost=0.75,
+        conflict_power=1.00,
+        edge_power=1.20,
+        transition_focus=1.50,
+    ):
         tile_list = _normalize_tiles(tiles)
         mask_list = _normalize_masks(masks)
+
         egregora_data = self._unwrap_scalar(egregora_data)
         scaling_method = self._unwrap_scalar(scaling_method)
+        combine_mode = self._unwrap_scalar(combine_mode) or "owner_alpha_over"
+
+        dominance_gamma = self._unwrap_float(dominance_gamma, 1.30)
+        conflict_boost = self._unwrap_float(conflict_boost, 0.90)
+        edge_boost = self._unwrap_float(edge_boost, 0.75)
+        conflict_power = self._unwrap_float(conflict_power, 1.00)
+        edge_power = self._unwrap_float(edge_power, 1.20)
+        transition_focus = self._unwrap_float(transition_focus, 1.50)
 
         if egregora_data is None:
             raise ValueError("Egregora Combine requires egregora_data.")
@@ -669,12 +852,14 @@ class Egregora_Combine:
         in_dtype = tile_list[0].dtype
         channels = tile_list[0].shape[-1] if tile_list[0].ndim == 4 else 3
 
-        output = torch.zeros((1, canvas_h, canvas_w, channels), dtype=torch.float32, device=device)
-        weights = torch.zeros((1, canvas_h, canvas_w, 1), dtype=torch.float32, device=device)
+        if combine_mode == "normalized":
+            output = torch.zeros((1, canvas_h, canvas_w, channels), dtype=torch.float32, device=device)
+            weights = torch.zeros((1, canvas_h, canvas_w, 1), dtype=torch.float32, device=device)
+        else:
+            canvas = torch.zeros((1, canvas_h, canvas_w, channels), dtype=torch.float32, device=device)
 
         for i in range(use_count):
             tile_tensor = tile_list[i].to(dtype=torch.float32)
-            mask_tensor = mask_list[i].to(device=device, dtype=torch.float32)
             box = ordered_boxes[i]
 
             if tile_tensor.ndim == 3:
@@ -684,32 +869,56 @@ class Egregora_Combine:
 
             target_w = int(box["w"])
             target_h = int(box["h"])
+
             if tile_tensor.shape[2] != target_w or tile_tensor.shape[1] != target_h:
                 tile_tensor = resize_image_tensor(tile_tensor, target_w, target_h, scaling_method)
 
-            if mask_tensor.ndim != 2:
-                raise ValueError("Each mask must be a 2D tensor.")
-            if mask_tensor.shape[0] != target_h or mask_tensor.shape[1] != target_w:
-                mask_tensor = torch.nn.functional.interpolate(
-                    mask_tensor.unsqueeze(0).unsqueeze(0),
-                    size=(target_h, target_w),
-                    mode="bilinear",
-                    align_corners=False,
-                ).squeeze(0).squeeze(0)
-
-            mask_4d = torch.clamp(mask_tensor, 0.0, 1.0).unsqueeze(0).unsqueeze(-1)
+            mask_tensor = self._prepare_mask(mask_list[i], target_h, target_w, device=device)
 
             x = int(box["x"])
             y = int(box["y"])
             x2 = x + target_w
             y2 = y + target_h
 
-            output[:, y:y2, x:x2, :] += tile_tensor * mask_4d
-            weights[:, y:y2, x:x2, :] += mask_4d
+            if combine_mode == "normalized":
+                roi_tensor = output[:, y:y2, x:x2, :]
+                adapted_mask = self._apply_adaptive_dominance(
+                    mask_tensor=mask_tensor,
+                    tile_tensor=tile_tensor,
+                    roi_tensor=roi_tensor,
+                    dominance_gamma=dominance_gamma,
+                    conflict_boost=conflict_boost,
+                    edge_boost=edge_boost,
+                    conflict_power=conflict_power,
+                    edge_power=edge_power,
+                    transition_focus=transition_focus,
+                )
+                mask_4d = adapted_mask.unsqueeze(0).unsqueeze(-1)
+                output[:, y:y2, x:x2, :] += tile_tensor * mask_4d
+                weights[:, y:y2, x:x2, :] += mask_4d
+            else:
+                roi_tensor = canvas[:, y:y2, x:x2, :]
+                adapted_mask = self._apply_adaptive_dominance(
+                    mask_tensor=mask_tensor,
+                    tile_tensor=tile_tensor,
+                    roi_tensor=roi_tensor,
+                    dominance_gamma=dominance_gamma,
+                    conflict_boost=conflict_boost,
+                    edge_boost=edge_boost,
+                    conflict_power=conflict_power,
+                    edge_power=edge_power,
+                    transition_focus=transition_focus,
+                )
+                mask_4d = adapted_mask.unsqueeze(0).unsqueeze(-1)
+                canvas[:, y:y2, x:x2, :] = roi_tensor * (1.0 - mask_4d) + tile_tensor * mask_4d
 
-        weights = torch.where(weights > 0, weights, torch.ones_like(weights))
-        output = output / weights
-        final = torch.clamp(output, 0.0, 1.0).to(dtype=in_dtype)
+        if combine_mode == "normalized":
+            weights = torch.where(weights > 1e-8, weights, torch.ones_like(weights))
+            final = output / weights
+        else:
+            final = canvas
+
+        final = torch.clamp(final, 0.0, 1.0).to(dtype=in_dtype)
         return (final,)
 
 
@@ -729,6 +938,7 @@ class Egregora_Debug_Mask:
 
     RETURN_TYPES = ("MASK",)
     RETURN_NAMES = ("masks",)
+    OUTPUT_IS_LIST = (True,)
     FUNCTION = "execute"
     CATEGORY = "Egregora/Debug"
 
@@ -755,14 +965,14 @@ class Egregora_Debug_Mask:
         ]
 
         if not masks:
-            return (torch.ones((1, 64, 64), dtype=torch.float32),)
+            return ([torch.ones((64, 64), dtype=torch.float32)],)
 
         tile_index = int(tile_index)
         if tile_index <= 0:
-            return (torch.stack(masks, dim=0),)
+            return (masks,)
 
         idx = max(0, min(tile_index - 1, len(masks) - 1))
-        return (masks[idx].unsqueeze(0),)
+        return ([masks[idx]],)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -773,8 +983,8 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Egregora Algorithm": "Egregora Algorithm",
-    "Egregora Divide Select": "Egregora Divide Select",
-    "Egregora Combine": "Egregora Combine",
-    "Egregora Debug Mask": "Egregora Debug Mask",
+    "Egregora Algorithm": "🚀 Egregora Algorithm",
+    "Egregora Divide Select": "✂️ Egregora Divide Select",
+    "Egregora Combine": "🔗 Egregora Combine",
+    "Egregora Debug Mask": "🧪 Egregora Debug Mask",
 }
