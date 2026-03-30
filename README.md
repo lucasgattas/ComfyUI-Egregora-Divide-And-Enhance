@@ -1,53 +1,65 @@
-# ComfyUI · Egregora: Divide & Enhance
+# ComfyUI · Egregora: Divide & Enhance 🧩✨
 
-A focused set of ComfyUI nodes for tiled image enhancement and seamless recombination.
+A focused set of ComfyUI nodes for tiled image processing, designed to split images into owner-based padded tiles, generate seam-aware masks, and recombine them with smoother, more natural transitions.
 
-**Egregora: Divide & Enhance** combines the practical tiling workflow of divide-and-process pipelines with a cleaner mask system for smoother, more natural merges. The current version is centered on a simple, robust node flow:
+**Egregora: Divide & Enhance** is built for high-quality tiled upscaling and enhancement workflows where a large image must be processed in parts without losing spatial consistency.
 
-- plan the upscale and tile layout
-- split into tiles
-- generate masks that match the tile layout
-- process the tiles however you want
-- recombine them with consistent blending
+## 🌟 Core features
 
-This makes the pack especially useful for:
-- tiled upscaling
-- detail enhancement on very large images
-- workflows that exceed normal VRAM limits
-- controlled image processing tile by tile
-- reducing visible seams when recombining processed tiles
+- 🧠 deterministic tile planning  
+- 🧩 owner-based base regions  
+- 🖼️ padded tiles for context  
+- 🎭 mask-driven recombination  
+- 🌊 smoother seam transitions with optional mask warping  
 
 ---
 
-## What this node pack is for
+## 📌 What this node pack is for
 
-These nodes are designed for workflows where a full image is too large or too expensive to process in one pass.
+These nodes are designed for workflows where processing the full image in one pass is too expensive, too memory-heavy, or too unstable.
 
 Typical use cases:
-- upscale a large image in manageable tiles
-- send each tile through an enhancement or img2img workflow
-- preserve consistent tile placement from split to merge
-- inspect masks directly when debugging seams
-- use feathered masks to blend tiles more naturally than hard-edge recomposition
 
-The current implementation is especially strong when you want:
-- deterministic tile placement
-- mask-aware tiled recombination
-- a workflow that is simple to read and easy to debug
-- better seam behavior than a basic hard tile merge
+- tiled upscaling
+- large-image enhancement
+- img2img or detail passes on very large images
+- VRAM-constrained workflows
+- mask-aware recombination of processed tiles
+- debugging tile masks before expensive runs
+
+The main goal is not just to split an image, but to split it in a way that makes the merge more stable and more natural afterward.
 
 ---
 
-## Included nodes
+## 🏗️ Core idea
 
-### Egregora Algorithm
+The system no longer treats tiles as large overlapping windows competing equally over the same semantic region.
 
-Builds the tiling plan and the upscaled working canvas.
+Instead, it uses:
+
+- **base ownership regions**  
+  each tile has a primary region it owns
+
+- **context padding**  
+  the tile is expanded beyond its base region so the model has neighboring visual context
+
+- **mask-based seam blending**  
+  only the padded border area is used for the transition
+
+This makes tiled processing more stable, especially in stronger enhancement workflows where neighboring tiles may otherwise drift apart too much.
+
+---
+
+## 🧱 Included nodes
+
+### 🚀 Egregora Algorithm
+
+Builds the tile plan and the working upscaled canvas.
 
 **Inputs**
 - `image`
 - `tile_resolution`
-- `min_overlap`
+- `padding_px`
 - `min_scale_factor`
 - `tile_order`
 - `scaling_method`
@@ -57,49 +69,51 @@ Builds the tiling plan and the upscaled working canvas.
 - `EGREGORA_DATA`
 
 **What it does**
-- calculates the target working resolution based on `min_scale_factor`
-- rescales the source image to the working canvas
-- computes tile placement and overlap
-- stores the plan in `EGREGORA_DATA` for downstream nodes
+- computes the working resolution from the input image and `min_scale_factor`
+- rescales the image to that working size
+- divides the image into a deterministic base grid
+- expands each base tile with context padding
+- stores all tile placement data in `EGREGORA_DATA`
 
 **Why it matters**
-- the same tile plan is reused downstream
-- tile placement stays deterministic
-- split and combine stay aligned
+- split and merge always use the same tile plan
+- ownership and padding stay consistent
+- tile placement remains deterministic and reproducible
 
 ---
 
-### Egregora Divide Select
+### ✂️ Egregora Divide Select
 
-Splits the image into tiles and generates the corresponding masks.
+Splits the image into padded tiles and generates the masks used later in recombination.
 
 **Inputs**
 - `image`
 - `egregora_data`
 - `tile`
-- `feather_ratio`
+- `blend_px`
 - `feather_curve`
+- `mask_warp_strength`
+- `mask_warp_frequency`
 
 **Outputs**
 - `TILE(S)`
 - `MASK(S)`
 
 **What it does**
-- outputs all tiles or a selected tile
-- generates masks that match the exact tile layout
-- applies feathering directly in the mask generation step
+- outputs all tiles or one selected tile
+- generates masks that correspond exactly to the padded tile layout
+- uses a blend band around the owner region for transition
+- can slightly warp the mask to avoid perfectly straight seam lines
 
 **Important behavior**
 - `tile = 0` returns all tiles and all masks
 - any positive tile index returns only the selected tile and its mask
 
-This is useful both for production workflows and for debugging one tile at a time.
-
 ---
 
-### Egregora Combine
+### 🔗 Egregora Combine
 
-Recombines processed tiles using the masks generated in the split stage.
+Recombines processed tiles using the masks generated during the split stage.
 
 **Inputs**
 - `tiles`
@@ -111,45 +125,46 @@ Recombines processed tiles using the masks generated in the split stage.
 - `IMAGE`
 
 **What it does**
-- places each processed tile back in the correct position
-- uses the provided masks directly instead of rebuilding them
+- places each processed tile back into its exact padded location
+- applies the provided masks directly
 - accumulates image values and mask weights
-- normalizes the final result to avoid hard seams
+- normalizes the final image so the result is blended cleanly
 
-**Why this is important**
-Using the masks generated during the divide step helps keep split and merge behavior consistent. This greatly improves seam quality compared with recomputing approximate masks during recombination.
+**Why this matters**
+The combine stage does not rebuild masks from scratch.  
+It uses the masks already generated during the divide stage, which keeps split and merge behavior aligned.
 
 ---
 
-### Egregora Debug Mask
+### 🧪 Egregora Debug Mask
 
-Outputs the generated masks directly, in the same style as tiled mask outputs used in practical ComfyUI workflows.
+Outputs the generated masks directly for inspection.
 
 **Inputs**
 - `egregora_data`
-- `feather_ratio`
+- `blend_px`
 - `feather_curve`
+- `mask_warp_strength`
+- `mask_warp_frequency`
 - `tile_index`
 
 **Outputs**
 - `MASK`
 
 **What it does**
-- previews the actual masks used by the workflow
-- helps diagnose seam behavior before running expensive tile processing
-- makes it easy to compare feather settings and curves
+- previews the masks exactly as they are being generated
+- lets you inspect all masks or a single mask
+- helps debug seam behavior before running expensive processing
 
 **Important behavior**
 - `tile_index = 0` returns the full batch of masks
 - any positive tile index returns one selected mask
 
-This node is useful for checking whether the mask itself is correct before investigating model-side tile differences.
-
 ---
 
-## Node flow
+## 🔄 Current node flow
 
-The core workflow is now intentionally simple:
+### Standard workflow
 
 ```text
 Egregora Algorithm
@@ -161,7 +176,7 @@ Egregora Divide Select
 Egregora Combine
 ```
 
-For mask inspection:
+### Mask inspection workflow
 
 ```text
 Egregora Algorithm
@@ -171,108 +186,130 @@ Egregora Debug Mask
 
 ---
 
-## Feather system
+## 🧠 Main concepts
 
-The current mask system supports:
+### 1. Base ownership
+Each tile has a base region it owns.  
+This avoids excessive semantic competition between neighboring tiles.
 
-- `feather_ratio`
-- `feather_curve`
+### 2. Padding for context
+Each tile is expanded beyond its base region.  
+This gives the model more context while processing the tile.
 
-### feather_ratio
-Controls how much of the overlap is used for the feather transition.
+### 3. Blend band
+The transition between tiles happens in a controllable band defined by `blend_px`.
 
-### feather_curve
-Controls how the transition behaves across the feathered region.
+### 4. Mask warping
+The mask can be gently warped to reduce perfectly straight seam lines.
 
-Available curves:
+---
+
+## ⚙️ Important parameters
+
+### `tile_resolution`
+Controls the base size of each tile region.
+
+Larger values:
+- reduce the total number of tiles
+- need more VRAM
+- often improve consistency
+
+Smaller values:
+- use less VRAM
+- create more seams
+- can increase tile-to-tile variation
+
+### `padding_px`
+Controls how much contextual padding is added around each base tile.
+
+Higher values:
+- give the model more neighboring context
+- usually improve continuity
+- increase compute and overlap cost
+
+### `blend_px`
+Controls the width of the transition band around the owner region.
+
+Higher values:
+- create longer, softer transitions
+- can reduce visible seams
+- may increase blending between more different tiles
+
+Lower values:
+- keep ownership more strict
+- may make transitions more visible
+
+### `feather_curve`
+Controls the shape of the blend falloff.
+
+Available options:
 - `linear`
 - `smoothstep`
 - `smootherstep`
 - `cosine`
 
-In practice:
-- `linear` is the most direct and predictable
+General guidance:
+- `linear` is the most direct
 - `smoothstep` is softer
-- `smootherstep` is usually the most natural-looking option
-- `cosine` can also give a smooth blend, depending on the image
+- `smootherstep` is usually the best starting point
+- `cosine` can sometimes produce a more organic transition
 
-If your goal is the cleanest natural merge, `smootherstep` is often a strong starting point.
+### `mask_warp_strength`
+Controls how strongly the mask boundary is warped.
 
----
+Useful for:
+- breaking overly perfect straight seams
+- reducing ruler-like edges
 
-## How to use
+Use small values first.
 
-### Basic tiled enhancement workflow
+### `mask_warp_frequency`
+Controls the frequency of the warp pattern.
 
-1. Load your source image.
-2. Send it into **Egregora Algorithm**.
-3. Choose:
-   - a working `tile_resolution`
-   - a `min_overlap`
-   - a `min_scale_factor`
-   - a `tile_order`
-4. Send the image and `EGREGORA_DATA` into **Egregora Divide Select**.
-5. Choose:
-   - `tile = 0` to output all tiles
-   - `feather_ratio`
-   - `feather_curve`
-6. Process the output tiles with your preferred enhancement pipeline.
-7. Send the processed tiles, masks, and `EGREGORA_DATA` into **Egregora Combine**.
-8. Save the recombined image.
+Lower values:
+- broader, slower undulation
+
+Higher values:
+- more frequent contour variation
+
+Use moderate values unless you specifically want stronger irregularity.
 
 ---
 
-## Practical guidance
+## ✅ Recommended starting settings
 
-### Choosing tile resolution
-Larger tiles:
-- reduce the number of tile boundaries
-- may improve global consistency
-- require more VRAM
+A good baseline:
 
-Smaller tiles:
-- are easier on memory
-- may produce more visible variation between tiles
-- increase the importance of a good overlap and mask
-
-### Choosing overlap
-More overlap:
-- gives the blend more room to transition
-- usually improves seam quality
-- increases compute and redundancy
-
-Too little overlap:
-- makes seams harder to hide
-
-### Choosing feather settings
-Good starting point:
-- `feather_ratio = 0.5`
+- `tile_resolution = 1024`
+- `padding_px = 128`
+- `blend_px = 48`
 - `feather_curve = smootherstep`
+- `mask_warp_strength = 1.0`
+- `mask_warp_frequency = 1.0`
 
-If you want a more direct mask:
-- use `linear`
-
-If you want a softer transition:
-- use `smoothstep` or `smootherstep`
-
----
-
-## Why use these nodes instead of a simpler tile split/merge setup?
-
-Because the point is not only to split an image.
-
-The useful part is having:
-- a planned upscale canvas
-- deterministic tile placement
-- masks that match the split stage
-- a clean debug path for mask inspection
-- a smoother and more natural recombination result
-
-This makes the node pack well suited for users who want more control over tiled enhancement while still keeping the graph readable.
+Then adjust from there depending on:
+- VRAM
+- image resolution
+- denoise strength
+- how aggressive the enhancement is
 
 ---
 
-## Installation
+## 💡 Why this approach works well
+
+Compared with simpler overlapping-tile systems, this setup aims to reduce:
+
+- duplicated semantic regions
+- unstable multi-tile competition
+- harsh seam geometry
+- overly mechanical transitions
+
+The key difference is that tiles are not treated as fully overlapping equal windows.  
+They are treated as **owner regions with contextual padding**, then blended only where necessary.
+
+---
+
+## 📦 Installation
 
 Clone into your ComfyUI custom nodes folder:
 
@@ -285,9 +322,7 @@ Then restart ComfyUI.
 
 ---
 
-## Current node list
-
-The current core nodes are:
+## 📋 Current node list
 
 - `Egregora Algorithm`
 - `Egregora Divide Select`
@@ -296,25 +331,25 @@ The current core nodes are:
 
 ---
 
-## Notes
+## 📝 Notes
 
-- older screenshots and previews were removed because the node behavior and layout changed
-- the current version is focused on the actual production workflow rather than legacy previews
-- if you update from an older version, recreating the nodes in an existing workflow may be necessary after schema changes
+- older screenshots and previews were removed because the implementation changed substantially
+- some earlier experiments were intentionally removed to keep the current workflow cleaner
+- if you update from an older version, recreating nodes in an existing workflow may be necessary after schema changes
 
 ---
 
-## Credits
+## 🙌 Credits
 
 Special thanks to the ideas and workflows that helped shape this project.
 
 - **Divide and Conquer** for the broader inspiration around tiled enhancement workflows
-- **comfyui-image-tiled-nodes** by **Tuki** for helping establish a strong practical reference for tile masks and recombination behavior
+- **comfyui-image-tiled-nodes** by **Tuki** for strong practical reference points around tiled masks and recombination
 
-This project now aims to combine the strengths of both approaches into a cleaner and more flexible tiled enhancement workflow for ComfyUI.
+This project aims to combine strengths from both directions into a cleaner and more flexible tiled enhancement workflow for ComfyUI.
 
 ---
 
-## License
+## 📜 License
 
 GPL-3.0
